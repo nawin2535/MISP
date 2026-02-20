@@ -338,6 +338,114 @@ function Download-AllScripts {
     
     return $AllRequiredDownloaded
 }
+
+function Invoke-Step4-DownloadActiveResponse {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 4: Download action-script & block-malicious.ps1" "INFO"
+    Write-Log "========================================" "INFO"
+    
+    # Find system drive
+    $SystemDrive = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Root -match '^[A-Z]:\\$' } | Select-Object -First 1).Root -replace ':\\', ''
+    if (-not $SystemDrive) {
+        $SystemDrive = "C"
+        Write-Log "Could not detect system drive, defaulting to C:" "WARNING"
+    }
+    
+    # Define ActiveResponse Wazuh Directory
+    $ActiveResponsePath = "${SystemDrive}:\Program Files (x86)\ossec-agent\active-response\bin"
+    
+    # Check if directory exists
+    if (-not (Test-Path $ActiveResponsePath)) {
+        Write-Log "Active Response directory not found: $ActiveResponsePath" "WARNING"
+        Write-Log "Wazuh Agent may not be installed. Skipping Step 4." "WARNING"
+        return $false
+    }
+    
+    Write-Log "Active Response Path: $ActiveResponsePath" "INFO"
+    
+    # Download action-script.bat
+    $ActionScriptUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
+    $SaveActionScriptPath = Join-Path $ActiveResponsePath "action-script.bat"
+    
+    Write-Log "Downloading action-script.bat..." "INFO"
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $ActionScriptUrl -OutFile $SaveActionScriptPath -UseBasicParsing -ErrorAction Stop
+        
+        if (Test-Path $SaveActionScriptPath) {
+            $FileSize = (Get-Item $SaveActionScriptPath).Length
+            Write-Log "Successfully downloaded action-script.bat ($([math]::Round($FileSize/1KB, 2)) KB)" "SUCCESS"
+        } else {
+            Write-Log "Download completed but file not found: $SaveActionScriptPath" "ERROR"
+            return $false
+        }
+    } catch {
+        Write-Log "Failed to download action-script.bat: $_" "ERROR"
+        Write-Log "Exception: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+    
+    # Download block-malicious.ps1
+    $BlockMalUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/wazuh/active-response/bin/block-malicious.ps1"
+    $SaveBlockMalPath = Join-Path $ActiveResponsePath "block-malicious.ps1"
+    
+    Write-Log "Downloading block-malicious.ps1..." "INFO"
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $BlockMalUrl -OutFile $SaveBlockMalPath -UseBasicParsing -ErrorAction Stop
+        
+        if (Test-Path $SaveBlockMalPath) {
+            $FileSize = (Get-Item $SaveBlockMalPath).Length
+            Write-Log "Successfully downloaded block-malicious.ps1 ($([math]::Round($FileSize/1KB, 2)) KB)" "SUCCESS"
+        } else {
+            Write-Log "Download completed but file not found: $SaveBlockMalPath" "ERROR"
+            return $false
+        }
+    } catch {
+        Write-Log "Failed to download block-malicious.ps1: $_" "ERROR"
+        Write-Log "Exception: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+    
+    Write-Log "Step 4 completed successfully" "SUCCESS"
+    return $true
+}
+
+function Invoke-Step5-RestartService {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 5: Restart Wazuh Service" "INFO"
+    Write-Log "========================================" "INFO"
+    
+    # Restart Wazuh Agent service
+    $ServiceName = "WazuhSvc"
+    
+    Write-Log "Checking if service '$ServiceName' exists..." "INFO"
+    $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    
+    if (-not $Service) {
+        Write-Log "Service '$ServiceName' not found. Wazuh Agent may not be installed." "WARNING"
+        Write-Log "Skipping service restart." "WARNING"
+        return $true
+    }
+    
+    Write-Log "Current service status: $($Service.Status)" "INFO"
+    
+    try {
+        Write-Log "Restarting service '$ServiceName'..." "INFO"
+        Restart-Service -Name $ServiceName -Force -ErrorAction Stop
+        
+        # Wait a moment for service to restart
+        Start-Sleep -Seconds 2
+        
+        $ServiceAfter = Get-Service -Name $ServiceName -ErrorAction Stop
+        Write-Log "Service restarted successfully. New status: $($ServiceAfter.Status)" "SUCCESS"
+        return $true
+    } catch {
+        Write-Log "Failed to restart service '$ServiceName': $_" "ERROR"
+        Write-Log "Exception: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
 #endregion
 
 #region Main Execution
@@ -394,6 +502,30 @@ try {
         } elseif (-not $Result) {
             Write-Log "Optional script '$($Script.Name)' failed (non-critical)" "WARNING"
         }
+    }
+    
+    # Step 4: Download Active Response scripts
+    Write-Log "----------------------------------------" "INFO"
+    $Step4Result = Invoke-Step4-DownloadActiveResponse
+    $ScriptResults += @{
+        Name = "Step4-DownloadActiveResponse"
+        Success = $Step4Result
+        Required = $false
+    }
+    if (-not $Step4Result) {
+        Write-Log "Step 4 failed (non-critical - Wazuh may not be installed)" "WARNING"
+    }
+    
+    # Step 5: Restart Wazuh Service
+    Write-Log "----------------------------------------" "INFO"
+    $Step5Result = Invoke-Step5-RestartService
+    $ScriptResults += @{
+        Name = "Step5-RestartWazuhService"
+        Success = $Step5Result
+        Required = $false
+    }
+    if (-not $Step5Result) {
+        Write-Log "Step 5 failed (non-critical - Wazuh may not be installed)" "WARNING"
     }
     
     # Summary

@@ -1,5 +1,4 @@
 ## Before you proceed to step 1, you must have the wazuh agent installed.
-## ก่อนคุณจะเริ่มดำเนินการ run file นี้ คุณต้องติดตั้ง wazuh agent ให้เรียบร้อยก่อน
 ## ----------------------------------------------------------
 ## step 1 : ##
 Write-Output "#### Install Sysmon & Config Wazuh Agent : ####"
@@ -45,7 +44,8 @@ try {
 ## $InstallDir = "C:\install-sysmon"
 
 # Define Sysmon configuration file download URL
-$SysmonConfigUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/sysmon/sysmonconfig-export.xml"
+# $SysmonConfigUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/sysmon/sysmonconfig-export.xml"
+$SysmonConfigUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/sysmonconfig-export-v2.xml"
 $ConfigPath = "${InstallDir}\sysmonconfig-export.xml"
 
 # Download Sysmon configuration file
@@ -111,7 +111,7 @@ if (Test-Path $OssecConfPath) {
     
     if ($OssecConfContent -notmatch [regex]::Escape($SysmonLine.Trim())) {
         
-        # อ่านไฟล์และเพิ่มโค้ดที่ต้องการหลังจาก `</localfile>` สุดท้าย
+        # read and add custom code after localfile tag `</localfile>`
         $UpdatedContent = $OssecConfContent -replace '(</localfile>)(?![\s\S]*</localfile>)', "`$1`n$SysmonLine"
         
         # Save the updated content
@@ -123,7 +123,7 @@ if (Test-Path $OssecConfPath) {
 
     if ($OssecConfContent -notmatch [regex]::Escape($ActiveResponseLine.Trim())) {
         
-        # อ่านไฟล์และเพิ่มโค้ดที่ต้องการหลังจาก `</localfile>` สุดท้าย
+        # read and add custom code after localfile tag `</localfile>`
         $UpdatedContent = $OssecConfContent -replace '(</active-response>)(?![\s\S]*</active-response>)', "`$1`n$ActiveResponseLine"
         
         # Save the updated content

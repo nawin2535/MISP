@@ -22,17 +22,17 @@ function Log-Detail {
 
 Log-Detail "=== AR SCRIPT STARTED (PowerShell) ==="
 
-# 1. Read stdin safely (multiple fallback methods)
+# 1. Read stdin safely with proper UTF-8 encoding
 Log-Detail "Step 1: Attempting to read stdin..."
 
 $inputJson = ""
 try {
-    # Method 1: ReadToEnd (preferred)
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    Log-Detail "Console input encoding set to UTF-8"
     $inputJson = Read-Host
-    #$inputJson = [Console]::In.ReadToEnd()
-    Log-Detail "ReadToEnd success. Length: $($inputJson.Length) chars"
+    Log-Detail "Read-Host success. Length: $($inputJson.Length) chars"
 } catch {
-    Log-Detail "ReadToEnd failed: $($_.Exception.Message)"
+    Log-Detail "Read-Host failed: $($_.Exception.Message)"
 }
 
 # Fallback if empty

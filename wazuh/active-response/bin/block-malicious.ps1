@@ -1,207 +1,510 @@
 ################################
-## PowerShell Active Response for MISP IoC
-## Full features: File delete (Event 15), IP block (Event 3), Domain block (Event 22)
-## Super detailed logging for debugging
-## Safe stdin reading + error handling
+## Wazuh Active Response (FINAL)
+## Supports: MISP + Sysmon + FIM
 ################################
 
-# Log file
 $logFile = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
 
-# Helper function to log with timestamp (safe, no suppression)
 function Log-Detail {
     param([string]$msg)
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    try {
-        "$timestamp - $msg" | Out-File -FilePath $logFile -Append -Encoding utf8 -ErrorAction Stop
-    } catch {
-        # Fallback ถ้า log เขียนไม่ได้
-        Write-Output "$timestamp - LOG WRITE ERROR: $msg"
-    }
+    "$timestamp - $msg" | Out-File -FilePath $logFile -Append -Encoding utf8
 }
 
 Log-Detail "=== AR SCRIPT STARTED (PowerShell) ==="
 
-# 1. Read stdin safely with proper UTF-8 encoding
-Log-Detail "Step 1: Attempting to read stdin..."
-
+# =========================
+# 1. Read STDIN
+# =========================
 $inputJson = ""
+
 try {
     [Console]::InputEncoding = [System.Text.Encoding]::UTF8
-    Log-Detail "Console input encoding set to UTF-8"
     $inputJson = Read-Host
-    Log-Detail "Read-Host success. Length: $($inputJson.Length) chars"
+    Log-Detail "Read-Host success. Length: $($inputJson.Length)"
 } catch {
     Log-Detail "Read-Host failed: $($_.Exception.Message)"
 }
 
-# Fallback if empty
+# fallback
 if ([string]::IsNullOrWhiteSpace($inputJson)) {
-    Log-Detail "ReadToEnd got empty - trying fallback loop..."
     try {
         $lines = @()
         while ($line = [Console]::In.ReadLine()) {
             $lines += $line
         }
         $inputJson = $lines -join "`n"
-        Log-Detail "Fallback loop success. Length: $($inputJson.Length) chars"
+        Log-Detail "Fallback read success. Length: $($inputJson.Length)"
     } catch {
-        Log-Detail "Fallback loop failed: $($_.Exception.Message)"
+        Log-Detail "Fallback failed"
     }
 }
 
-# Critical check
 if ([string]::IsNullOrWhiteSpace($inputJson)) {
-    Log-Detail "CRITICAL: STDIN is completely empty after all attempts"
-    Log-Detail "This means Wazuh did not send data or pipe is broken"
+    Log-Detail "CRITICAL: Empty input"
     exit 1
 }
 
-# Log raw input preview (limit to 2000 chars to avoid huge log)
+# preview log
 $preview = if ($inputJson.Length -gt 2000) { $inputJson.Substring(0,2000) + "..." } else { $inputJson }
-Log-Detail "RAW INPUT_JSON (preview):"
+Log-Detail "INPUT PREVIEW:"
 Log-Detail $preview
 
+# =========================
 # 2. Parse JSON
-Log-Detail "Step 2: Trying to parse JSON..."
+# =========================
 try {
-    $alertData = $inputJson | ConvertFrom-Json -ErrorAction Stop
-    Log-Detail "JSON parsed successfully"
+    $INPUT_ARRAY = $inputJson | ConvertFrom-Json
+    Log-Detail "JSON parsed OK"
 } catch {
-    Log-Detail "FATAL: JSON parse error - $($_.Exception.Message)"
-    Log-Detail "Raw input (truncated): $($inputJson.Substring(0, [Math]::Min(2000, $inputJson.Length)))..."
+    Log-Detail "JSON parse failed"
     exit 1
 }
 
-# 3. Extract basic fields
-$command = $alertData.command
-Log-Detail "Command received: $command"
+$command = $INPUT_ARRAY.command
+$alert   = $INPUT_ARRAY.parameters.alert
 
-$parameters = $alertData.parameters
-$alert = $parameters.alert
-if (-not $alert) {
-    Log-Detail "ERROR: No 'parameters.alert' in JSON"
-    exit 1
+# =========================
+# 3. Extract IOC (3 Modes)
+# =========================
+$IOCvalue = $null
+$IOCtype  = $null
+
+# 🔴 Mode 1: MISP
+if ($alert.data.misp) {
+    $IOCvalue = $alert.data.misp.value
+    $IOCtype  = $alert.data.misp.type
+    Log-Detail "Mode: MISP"
 }
 
-$rule = $alert.rule
-$rule_id = $rule.id
-$groups = $rule.groups
-Log-Detail "Rule ID: $rule_id"
-Log-Detail "Groups: $($groups -join ', ')"
+# 🟢 Mode 2: Sysmon - รองรับทั้ง .hash (Event 15) และ .hashes (Event 1,6,7)
+$hashField = $alert.data.win.eventdata.hashes
+if (-not $hashField) { $hashField = $alert.data.win.eventdata.hash }
 
-# 4. Check if MISP alert
-$isMisp = ($rule_id -eq "100622") -and ($groups -contains "misp" -or $groups -contains "misp_alert")
-Log-Detail "Is MISP alert? $isMisp"
-
-# Get host IP (for skip self-block in IP case)
-$hostip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "169.254.*" }).IPAddress | Select-Object -First 1
-Log-Detail "Local IP (for skip): $hostip"
-
-if ($isMisp) {
-    Log-Detail "Entering MISP handling block"
-
-    $data = $alert.data
-    $misp = $data.misp
-    if (-not $misp) {
-        Log-Detail "ERROR: No 'data.misp' found in alert"
-        exit 1
+elseif ($hashField) {
+    if ($hashField -match "SHA256=([A-Fa-f0-9]+)") {
+        $IOCvalue = $matches[1]
+        $IOCtype  = "sha256"
+        $eventID  = $alert.data.win.system.eventID
+        Log-Detail "Mode: Sysmon (EventID=$eventID)"
     }
+}
 
-    $iocValue     = $misp.value
-    $iocCategory  = $misp.category
-    $sourceDesc   = $misp.source.description
+# 🟡 Mode 3: Syscheck (FIM)
+if ($alert.syscheck.sha256_after) {
+    $IOCvalue = $alert.syscheck.sha256_after
+    $IOCtype  = "sha256"
+    Log-Detail "Mode: Syscheck (FIM)"
+}
 
-    Log-Detail "MISP IoC value: $iocValue"
-    Log-Detail "MISP Category: $iocCategory"
-    Log-Detail "Source Description: $sourceDesc"
+# 🟢 Mode 4: Sysmon
+<# elseif ($alert.data.win.eventdata.hashes) {
+    if ($alert.data.win.eventdata.hashes -match "SHA256=([A-Fa-f0-9]+)") {
+        $IOCvalue = $matches[1]
+        $IOCtype  = "sha256"
+        Log-Detail "Mode: Sysmon"
+    }
+} #>
 
-    # Case: File hash from Event 15 (Payload delivery)
-    if ($sourceDesc -match "Event 15" -and $iocValue -match "^[A-Fa-f0-9]{64}$") {
-        Log-Detail "Detected Event 15 + valid SHA256 pattern"
+if (-not $IOCvalue) {
+    Log-Detail "No IOC found → EXIT"
+    exit 0
+}
 
-        # Parse file path
-        if ($sourceDesc -match "Event 15:\s*(.+?)\s*FileCreateStreamHash") {
-            $filePath = $matches[1].Trim()
-            $filePath = $filePath -replace '\\\\', '\'
-            Log-Detail "Parsed file path: $filePath"
+Log-Detail "IOC: $IOCvalue"
 
-            if (Test-Path $filePath) {
-                Log-Detail "File exists at: $filePath"
+# =========================
+# 4. Extract Fields
+# =========================
+
+# Sysmon
+$imagePath  = $alert.data.win.eventdata.image
+$processId  = $alert.data.win.eventdata.processId
+
+# Syscheck
+$filePath   = $alert.syscheck.path
+
+Log-Detail "Sysmon Image: $imagePath"
+Log-Detail "Syscheck Path: $filePath"
+
+# =========================
+# 5. FILE RESPONSE (Sysmon)
+# =========================
+if ($IOCtype -eq "sha256" -and $imagePath) {
+
+    if (Test-Path $imagePath) {
+
+        try {
+            $fileHash = (Get-FileHash $imagePath -Algorithm SHA256).Hash
+
+            if ($fileHash -eq $IOCvalue) {
+
+                Log-Detail "Sysmon HASH MATCH → action"
+
+                if ($processId) {
+                    try {
+                        Stop-Process -Id $processId -Force
+                        Log-Detail "Killed PID: $processId"
+                    } catch {
+                        Log-Detail "Kill failed"
+                    }
+                }
 
                 try {
-                    $fileHash = (Get-FileHash $filePath -Algorithm SHA256 -ErrorAction Stop).Hash
-                    Log-Detail "Actual file hash: $fileHash"
-
-                    if ($fileHash -eq $iocValue) {
-                        Log-Detail "Hash MATCH! Attempting to delete file..."
-                        Remove-Item $filePath -Force -ErrorAction Stop
-                        Log-Detail "SUCCESS: Deleted malicious file $filePath (SHA256: $iocValue)"
-                    } else {
-                        Log-Detail "Hash MISMATCH (expected $iocValue, got $fileHash) - not deleting"
-                    }
+                    Remove-Item $imagePath -Force
+                    Log-Detail "Deleted file: $imagePath"
                 } catch {
-                    Log-Detail "ERROR during hash check or delete: $($_.Exception.Message)"
-                    Log-Detail "Stack trace: $($_.ScriptStackTrace)"
+                    Log-Detail "Delete failed"
                 }
-            } else {
-                Log-Detail "File NOT FOUND: $filePath"
             }
-        } else {
-            Log-Detail "Failed to parse file path from description"
+
+        } catch {
+            Log-Detail "Sysmon handling error"
         }
-    } else {
-        Log-Detail "Not Event 15 or invalid hash format - skipping file delete"
     }
-} else {
-    Log-Detail "Not a MISP alert (rule $rule_id or groups not match)"
 }
 
-# =======================================
-# Original logic: IP block (Event 3)
-# =======================================
-$winSystem = $alert.data.win.system
+
+# =========================
+# 5b. PROCESS RESPONSE (Sysmon Event 1)
+# =========================
+$eventID = $alert.data.win.system.eventID
+
+if ($IOCtype -eq "sha256" -and $eventID -eq "1") {
+    $imagePath = $alert.data.win.eventdata.image
+    $processId = $alert.data.win.eventdata.processId
+
+    Log-Detail "Event 1: Malicious process detected - $imagePath (PID=$processId)"
+
+    # Kill process ตาม PID ที่ได้จาก alert โดยตรง
+    if ($processId) {
+        try {
+            Stop-Process -Id $processId -Force
+            Log-Detail "Killed PID: $processId"
+        } catch {
+            Log-Detail "Kill PID failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Kill process อื่นที่รัน executable เดียวกัน
+    if ($imagePath) {
+        try {
+            $procs = Get-CimInstance Win32_Process | Where-Object {
+                $_.ExecutablePath -eq $imagePath
+            }
+            foreach ($p in $procs) {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                Log-Detail "Killed matching process PID: $($p.ProcessId)"
+            }
+        } catch {
+            Log-Detail "Kill by path failed: $($_.Exception.Message)"
+        }
+    }
+
+    Start-Sleep -Seconds 1
+
+    # ลบ executable
+    if ($imagePath -and (Test-Path $imagePath)) {
+        try {
+            Remove-Item $imagePath -Force
+            Log-Detail "Deleted executable: $imagePath"
+        } catch {
+            Log-Detail "Delete failed: $($_.Exception.Message)"
+        }
+    }
+}
+
+# =========================
+# 5c. DRIVER RESPONSE (Sysmon Event 6)
+# =========================
+if ($IOCtype -eq "sha256" -and $eventID -eq "6") {
+    $driverPath = $alert.data.win.eventdata.imageLoaded
+
+    Log-Detail "Event 6: Malicious driver detected - $driverPath"
+
+    # ⚠️ ลบ driver ตรงๆ ไม่ได้เพราะ kernel lock อยู่
+    # ต้อง schedule ลบตอน reboot แทน
+    if ($driverPath -and (Test-Path $driverPath)) {
+        try {
+            # MoveFileEx API - ลบตอน reboot
+            $code = @"
+using System;
+using System.Runtime.InteropServices;
+public class FileHelper {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool MoveFileEx(string lpExistingFileName,
+        string lpNewFileName, int dwFlags);
+    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
+}
+"@
+            Add-Type -TypeDefinition $code
+            $result = [FileHelper]::MoveFileEx($driverPath, $null,
+                [FileHelper]::MOVEFILE_DELAY_UNTIL_REBOOT)
+
+            if ($result) {
+                Log-Detail "Scheduled driver delete on reboot: $driverPath"
+            } else {
+                Log-Detail "MoveFileEx failed"
+            }
+        } catch {
+            Log-Detail "Driver delete error: $($_.Exception.Message)"
+        }
+    }
+
+    # Disable driver service ถ้ามี
+    try {
+        $driverName = [System.IO.Path]::GetFileNameWithoutExtension($driverPath)
+        $svc = Get-Service -Name $driverName -ErrorAction SilentlyContinue
+        if ($svc) {
+            Stop-Service -Name $driverName -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $driverName -StartupType Disabled
+            Log-Detail "Disabled driver service: $driverName"
+        }
+    } catch {
+        Log-Detail "Service disable error: $($_.Exception.Message)"
+    }
+}
+
+# =========================
+# 5d. DLL RESPONSE (Sysmon Event 7)
+# =========================
+if ($IOCtype -eq "sha256" -and $eventID -eq "7") {
+    $dllPath   = $alert.data.win.eventdata.imageLoaded
+    $procImage = $alert.data.win.eventdata.image
+
+    Log-Detail "Event 7: Malicious DLL detected - $dllPath"
+    Log-Detail "Loaded by process: $procImage"
+
+    # Kill process ที่โหลด DLL นี้อยู่ก่อน
+    try {
+        $procs = Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -eq $procImage
+        }
+        foreach ($p in $procs) {
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+            Log-Detail "Killed process PID: $($p.ProcessId) ($($p.Name))"
+        }
+    } catch {
+        Log-Detail "Kill process failed: $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds 2
+
+    # ลบ DLL
+    if ($dllPath -and (Test-Path $dllPath)) {
+        try {
+            Remove-Item $dllPath -Force
+            Log-Detail "Deleted DLL: $dllPath"
+        } catch {
+            # DLL อาจยัง lock อยู่ - schedule ลบตอน reboot
+            try {
+                $code = @"
+using System;
+using System.Runtime.InteropServices;
+public class FileHelper2 {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool MoveFileEx(string lpExistingFileName,
+        string lpNewFileName, int dwFlags);
+    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
+}
+"@
+                Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+                $result = [FileHelper2]::MoveFileEx($dllPath, $null,
+                    [FileHelper2]::MOVEFILE_DELAY_UNTIL_REBOOT)
+                if ($result) {
+                    Log-Detail "Scheduled DLL delete on reboot: $dllPath"
+                }
+            } catch {
+                Log-Detail "Schedule delete failed: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
+
+# =========================
+# 5. FILE RESPONSE (Sysmon Event 15)
+# =========================
+
+if ($IOCtype -eq "sha256" -and $eventID -eq "15") {
+
+    $targetFile = $alert.data.win.eventdata.targetFilename
+    Log-Detail "Sysmon targetFilename: $targetFile"
+    if (Test-Path $targetFile) {
+        try {
+            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
+            Log-Detail "File hash: $fileHash"
+            Log-Detail "IOC hash:  $IOCvalue"
+
+            if ($fileHash -eq $IOCvalue) {
+                Log-Detail "HASH MATCH → kill processes then delete"
+
+                # Kill process ที่เปิดไฟล์นี้อยู่ผ่าน handle
+                try {
+                    $processes = Get-CimInstance Win32_Process | Where-Object {
+                        $_.CommandLine -like "*$targetFile*"
+                    }
+                    foreach ($proc in $processes) {
+                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                        Log-Detail "Killed PID: $($proc.ProcessId) ($($proc.Name))"
+                    }
+                } catch {
+                    Log-Detail "Kill by CommandLine failed: $($_.Exception.Message)"
+                }
+
+                # ใช้ handle64.exe ถ้ามี (Sysinternals) เพื่อ release file lock
+                $handleExe = "C:\Tools\handle64.exe"
+                if (Test-Path $handleExe) {
+                    try {
+                        $handleOutput = & $handleExe -accepteula -nobanner "$targetFile" 2>&1
+                        foreach ($line in $handleOutput) {
+                            if ($line -match "pid: (\d+)") {
+                                $pidProcess = $matches[1]
+                                Stop-Process -Id $pidProcess -Force -ErrorAction SilentlyContinue
+                                Log-Detail "Killed handle PID: $pidProcess"
+                            }
+                        }
+                    } catch {
+                        Log-Detail "handle64 failed: $($_.Exception.Message)"
+                    }
+                }
+
+                # รอให้ process ปิดก่อนลบ
+                Start-Sleep -Seconds 2
+
+                # ลบไฟล์
+                try {
+                    Remove-Item $targetFile -Force
+                    Log-Detail "Deleted: $targetFile"
+                } catch {
+                    # ถ้าลบไม่ได้ ให้ schedule ลบตอน reboot
+                    try {
+                        $null = Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$targetFile`"" -WindowStyle Hidden
+                        Log-Detail "Scheduled delete via cmd: $targetFile"
+                    } catch {
+                        Log-Detail "Delete failed: $($_.Exception.Message)"
+                    }
+                }
+
+            } else {
+                Log-Detail "Hash mismatch - no action"
+            }
+        } catch {
+            Log-Detail "Error: $($_.Exception.Message)"
+        }
+    } else {
+        Log-Detail "targetFile not found: $targetFile"
+    }
+}
+
+# =========================
+# 6. FILE RESPONSE (FIM)
+# =========================
+if ($IOCtype -eq "sha256" -and $filePath) {
+
+    if (Test-Path $filePath) {
+        try {
+            $fileHash = (Get-FileHash $filePath -Algorithm SHA256).Hash
+
+            if ($fileHash -eq $IOCvalue) {
+                Log-Detail "FIM HASH MATCH → kill processes then delete"
+
+                # Kill by ExecutablePath ตรงๆ
+                try {
+                    $processes = Get-CimInstance Win32_Process | Where-Object {
+                        $_.ExecutablePath -eq $filePath
+                    }
+                    foreach ($proc in $processes) {
+                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                        Log-Detail "Killed PID (ExecutablePath): $($proc.ProcessId)"
+                    }
+                } catch {
+                    Log-Detail "Kill by ExecutablePath failed: $($_.Exception.Message)"
+                }
+
+                # Kill by CommandLine
+                try {
+                    $processes2 = Get-CimInstance Win32_Process | Where-Object {
+                        $_.CommandLine -like "*$filePath*"
+                    }
+                    foreach ($proc in $processes2) {
+                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                        Log-Detail "Killed PID (CommandLine): $($proc.ProcessId)"
+                    }
+                } catch {
+                    Log-Detail "Kill by CommandLine failed: $($_.Exception.Message)"
+                }
+
+                # รอให้ process ปิด
+                Start-Sleep -Seconds 2
+
+                # ลบไฟล์
+                try {
+                    Remove-Item $filePath -Force
+                    Log-Detail "Deleted: $filePath"
+                } catch {
+                    try {
+                        $null = Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$filePath`"" -WindowStyle Hidden
+                        Log-Detail "Scheduled delete via cmd: $filePath"
+                    } catch {
+                        Log-Detail "Delete failed: $($_.Exception.Message)"
+                    }
+                }
+
+            } else {
+                Log-Detail "FIM hash mismatch"
+            }
+        } catch {
+            Log-Detail "FIM handling error: $($_.Exception.Message)"
+        }
+    } else {
+        Log-Detail "File not found (FIM): $filePath"
+    }
+}
+
+# =========================
+# 7. NETWORK BLOCK (Sysmon Event 3)
+# =========================
+$winSystem    = $alert.data.win.system
 $winEventdata = $alert.data.win.eventdata
 
 if ($winSystem.eventID -eq '3') {
-    Log-Detail "Detected Event 3 (Network connection) - entering IP block logic"
 
-    $IOCvalue = $winEventdata.destinationIp
-    Log-Detail "Destination IP(s): $IOCvalue"
+    $ip = $winEventdata.destinationIp
 
-    foreach ($ip in $IOCvalue) {
-        $existingRule = Get-NetFirewallRule -DisplayName "Wazuh Active Response - $ip" -ErrorAction SilentlyContinue
-        if ($command -eq 'add' -and $ip -ne '127.0.0.1' -and $ip -ne '0.0.0.0' -and $ip -ne $hostip -and -not $existingRule) {
-            Log-Detail "Adding firewall rule for IP: $ip"
-            New-NetFirewallRule -DisplayName "Wazuh Active Response - $ip" -Direction Outbound -LocalPort Any -Protocol Any -Action Block -RemoteAddress $ip
-            Log-Detail "$ip added to blocklist via Windows Firewall"
-        } elseif ($command -eq 'delete' -and $ip -ne '127.0.0.1' -and $ip -ne '0.0.0.0' -and $ip -ne $hostip -and $existingRule) {
-            Log-Detail "Removing firewall rule for IP: $ip"
-            Remove-NetFirewallRule -DisplayName "Wazuh Active Response - $ip"
-            Log-Detail "$ip removed from blocklist via Windows Firewall"
+    if ($ip) {
+        $ruleName = "Wazuh AR Block $ip"
+
+        if ($command -eq "add") {
+            New-NetFirewallRule -DisplayName $ruleName `
+                -Direction Outbound -Action Block `
+                -RemoteAddress $ip -Protocol Any
+            Log-Detail "Blocked IP: $ip"
+        }
+
+        elseif ($command -eq "delete") {
+            Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+            Log-Detail "Unblocked IP: $ip"
         }
     }
 }
 
-# =======================================
-# Original logic: Domain block (Event 22)
-# =======================================
+# =========================
+# 8. DOMAIN BLOCK (Sysmon Event 22)
+# =========================
 if ($winSystem.eventID -eq '22') {
-    Log-Detail "Detected Event 22 (DNS Query) - entering domain block logic"
 
-    $IOCvaluequeryname = $winEventdata.queryName
-    Log-Detail "Query Name (domain): $IOCvaluequeryname"
-
+    $domain = $winEventdata.queryName
     $hostsPath = "C:\Windows\System32\drivers\etc\hosts"
-    $hostEntry = "127.0.0.1`t$IOCvaluequeryname"
 
-    if (-not (Select-String -Path $hostsPath -Pattern "^127\.0\.0\.1`t$IOCvaluequeryname$" -Quiet)) {
-        Add-Content -Path $hostsPath -Value $hostEntry
-        Log-Detail "$IOCvaluequeryname added to hosts file with 127.0.0.1"
-    } else {
-        Log-Detail "Domain $IOCvaluequeryname already blocked in hosts file"
+    if ($domain -and -not (Select-String $hostsPath $domain -Quiet)) {
+        Add-Content $hostsPath "127.0.0.1`t$domain"
+        Log-Detail "Blocked domain: $domain"
     }
 }
 
+# =========================
+# END
+# =========================
 Log-Detail "=== AR SCRIPT ENDED ==="
 exit 0

@@ -143,7 +143,7 @@ $Settings = New-ScheduledTaskSettingsSet `
 # ---------------------------
 
 $Principal = New-ScheduledTaskPrincipal `
-    -UserId "$env:USERNAME" `
+    -UserId "SYSTEM" `
     -LogonType Interactive `
     -RunLevel Highest
 
@@ -190,6 +190,49 @@ if ($_.Exception) {
 exit 1
 
 
+}
+
+# ---------------------------
+# Register Watchdog Task
+# (AtStartup - ตรวจสอบ task หลัก)
+# ---------------------------
+
+Write-ColorOutput "Creating Watchdog Task..." Yellow
+
+$WatchdogScript = Join-Path $PSScriptRoot "watchdog-task.ps1"
+
+# ตรวจสอบว่า watchdog script มีอยู่
+if (-not (Test-Path $WatchdogScript)) {
+    Write-ColorOutput "WARNING : watchdog-task.ps1 not found - skipping watchdog setup" Yellow
+} else {
+
+    $WatchdogAction = New-ScheduledTaskAction `
+        -Execute "PowerShell.exe" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WatchdogScript`"" `
+        -WorkingDirectory $WorkingDir
+
+    $WatchdogTrigger = New-ScheduledTaskTrigger -AtStartup
+
+    $WatchdogSettings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+
+    $WatchdogPrincipal = New-ScheduledTaskPrincipal `
+        -UserId "SYSTEM" `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+
+    Register-ScheduledTask `
+        -TaskName "SSJMUK Task Watchdog" `
+        -Action $WatchdogAction `
+        -Trigger $WatchdogTrigger `
+        -Settings $WatchdogSettings `
+        -Principal $WatchdogPrincipal `
+        -Description "Startup checker: recreates SSJMUK Cyber Update task if missing" `
+        -Force | Out-Null
+
+    Write-ColorOutput "SUCCESS : Watchdog Task Created" Green
 }
 
 #endregion

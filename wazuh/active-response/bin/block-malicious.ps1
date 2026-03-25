@@ -49,6 +49,7 @@ if ([string]::IsNullOrWhiteSpace($inputJson)) {
 $preview = if ($inputJson.Length -gt 2000) { $inputJson.Substring(0,2000) + "..." } else { $inputJson }
 Log-Detail "INPUT PREVIEW:"
 Log-Detail $preview
+#Log-Detail $inputJson
 
 # =========================
 # 2. Parse JSON
@@ -78,16 +79,17 @@ if ($alert.data.misp) {
 }
 
 # 🟢 Mode 2: Sysmon - รองรับทั้ง .hash (Event 15) และ .hashes (Event 1,6,7)
+$eventID  = $alert.data.win.system.eventID
 $hashField = $alert.data.win.eventdata.hashes
-if (-not $hashField) { $hashField = $alert.data.win.eventdata.hash }
 
-elseif ($hashField) {
-    if ($hashField -match "SHA256=([A-Fa-f0-9]+)") {
-        $IOCvalue = $matches[1]
-        $IOCtype  = "sha256"
-        $eventID  = $alert.data.win.system.eventID
-        Log-Detail "Mode: Sysmon (EventID=$eventID)"
-    }
+if (-not $hashField) {
+    $hashField = $alert.data.win.eventdata.hash
+}
+
+if ($hashField -match "SHA256=([A-Fa-f0-9]+)") {
+    $IOCvalue = $matches[1]
+    $IOCtype  = "sha256"
+    Log-Detail "Mode: Sysmon (EventID=$eventID)"
 }
 
 # 🟡 Mode 3: Syscheck (FIM)
@@ -97,14 +99,6 @@ if ($alert.syscheck.sha256_after) {
     Log-Detail "Mode: Syscheck (FIM)"
 }
 
-# 🟢 Mode 4: Sysmon
-<# elseif ($alert.data.win.eventdata.hashes) {
-    if ($alert.data.win.eventdata.hashes -match "SHA256=([A-Fa-f0-9]+)") {
-        $IOCvalue = $matches[1]
-        $IOCtype  = "sha256"
-        Log-Detail "Mode: Sysmon"
-    }
-} #>
 
 if (-not $IOCvalue) {
     Log-Detail "No IOC found → EXIT"
@@ -168,7 +162,7 @@ if ($IOCtype -eq "sha256" -and $imagePath) {
 # =========================
 # 5b. PROCESS RESPONSE (Sysmon Event 1)
 # =========================
-$eventID = $alert.data.win.system.eventID
+# $eventID = $alert.data.win.system.eventID
 
 if ($IOCtype -eq "sha256" -and $eventID -eq "1") {
     $imagePath = $alert.data.win.eventdata.image
@@ -480,9 +474,7 @@ if ($winSystem.eventID -eq '3') {
                 -Direction Outbound -Action Block `
                 -RemoteAddress $ip -Protocol Any
             Log-Detail "Blocked IP: $ip"
-        }
-
-        elseif ($command -eq "delete") {
+        } elseif ($command -eq "delete") {
             Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
             Log-Detail "Unblocked IP: $ip"
         }

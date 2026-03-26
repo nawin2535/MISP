@@ -137,3 +137,16 @@ Run as Administrator
 ## 👨‍💻 Maintainer
 
 Developed by SSJMUK Cyber Team
+
+
+
+
+
+
+--------------
+
+
+
+wazuh install
+
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.1-1.msi -OutFile $env:tmp\wazuh-agent; msiexec.exe /i $env:tmp\wazuh-agent /q WAZUH_MANAGER='wazuhserver-mdo.moph.go.th' WAZUH_REGISTRATION_PASSWORD='xxx' WAZUH_AGENT_GROUP='xxx' WAZUH_AGENT_NAME='xxx'

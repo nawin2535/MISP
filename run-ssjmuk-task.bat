@@ -21,6 +21,43 @@ set PS_SCRIPT=%SCRIPT_DIR%ssjmuk-task.ps1
 set MAX_RETRIES=5
 set RETRY_DELAY=10
 
+REM ============================================================================
+REM SELF-UPDATE: Download latest version of this script from GitHub
+REM ============================================================================
+echo Checking for script updates...
+
+set SELF_URL=%GITHUB_BASE%/run-ssjmuk-task.bat
+set SELF_NEW=%SCRIPT_DIR%run-ssjmuk-task.new.bat
+set SELF_CURRENT=%~f0
+
+REM Download latest version เป็นชื่อ .new ก่อน
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri '%SELF_URL%' -OutFile '%SELF_NEW%' -UseBasicParsing -ErrorAction Stop; exit 0 } catch { exit 1 }"
+
+if %ERRORLEVEL% EQU 0 (
+    REM เปรียบเทียบว่าไฟล์ต่างกันไหม
+    fc /b "%SELF_CURRENT%" "%SELF_NEW%" >nul 2>&1
+    if errorlevel 1 (
+        echo UPDATE FOUND: Re-launching updated script...
+        REM สร้าง helper bat เพื่อ overwrite แล้ว re-launch
+        set UPDATER=%TEMP%\ssjmuk-updater.bat
+        (
+            echo @echo off
+            echo timeout /t 2 /nobreak ^>nul
+            echo copy /y "%SELF_NEW%" "%SELF_CURRENT%" ^>nul
+            echo del "%SELF_NEW%"
+            echo start "" cmd.exe /c "%SELF_CURRENT%"
+        ) > "%TEMP%\ssjmuk-updater.bat"
+        start "" cmd.exe /c "%TEMP%\ssjmuk-updater.bat"
+        exit /b
+    ) else (
+        echo SUCCESS: Script is already up to date
+        del "%SELF_NEW%" >nul 2>&1
+    )
+) else (
+    echo WARNING: Could not check for updates, continuing with current version...
+)
+
 echo ============================================================================
 echo Sysmon Task Runner - Downloading from GitHub
 echo ============================================================================

@@ -85,7 +85,7 @@ function Send-DiscordSummary {
         [array]$Results
     )
 
-    # Unicode escape — ไม่พึ่ง emoji literal ในไฟล์
+    # Unicode escape - ไม่พึ่ง emoji literal ในไฟล์
     $iconOK   = [System.Char]::ConvertFromUtf32(0x2705)  # ✅
     $iconFail = [System.Char]::ConvertFromUtf32(0x274C)  # ❌
 
@@ -502,6 +502,91 @@ function Invoke-Step5-RestartService {
     Write-Log "Failed to restart '$ServiceName' after $MaxServiceRetries attempts" "ERROR"
     return $false
 }
+
+function Invoke-Step6-BlockFoxitFirewall {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 6: Block All Foxit Software Outbound (Firewall)" "INFO"
+    Write-Log "========================================" "INFO"
+
+    # Resolve base paths - ครอบคลุมทุก product ใน Foxit Software folder
+    $PF86    = ${env:ProgramFiles(x86)}
+    $AppData = $env:APPDATA
+
+    if (-not $PF86) {
+        $PF86 = $env:ProgramFiles
+        Write-Log "ProgramFiles(x86) not found, falling back to ProgramFiles: $PF86" "WARNING"
+    }
+
+    # Scan root "Foxit Software" ทั้งสอง location - recursive ครอบทุก product
+    $ScanPaths = @(
+        @{ Label = "ProgramFiles"; Path = Join-Path $PF86    "Foxit Software" },
+        @{ Label = "AppData";      Path = Join-Path $AppData "Foxit Software" }
+    )
+
+    $AnyFailed   = $false
+    $TotalBlocked = 0
+
+    foreach ($Scan in $ScanPaths) {
+        Write-Log "Scanning: [$($Scan.Label)] $($Scan.Path)" "INFO"
+
+        if (-not (Test-Path $Scan.Path)) {
+            Write-Log "  Path not found - Foxit may not be installed here, skipping: $($Scan.Path)" "WARNING"
+            continue
+        }
+
+        # Enumerate .exe ทุกตัวแบบ recursive (ครอบ PhantomPDF, PDF Reader, PDF Editor ฯลฯ)
+        $Exes = Get-ChildItem -Path $Scan.Path -Filter "*.exe" -Recurse -ErrorAction SilentlyContinue
+        if (-not $Exes) {
+            Write-Log "  No .exe files found under: $($Scan.Path)" "WARNING"
+            continue
+        }
+
+        Write-Log "  Found $($Exes.Count) exe(s) - creating firewall rules..." "INFO"
+
+        foreach ($Exe in $Exes) {
+            # ชื่อ rule: "Block Foxit [label] [relative path]" เพื่อหลีกเลี่ยงชื่อซ้ำข้าม product
+            $RelPath     = $Exe.FullName.Substring($Scan.Path.Length).TrimStart('\')
+            $RuleName    = "Block Foxit [$($Scan.Label)] $RelPath Outbound"
+
+            try {
+                # ลบ rule เดิมถ้ามีอยู่ (idempotent)
+                $Existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+                if ($Existing) {
+                    Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+                }
+
+                New-NetFirewallRule `
+                    -DisplayName  $RuleName `
+                    -Direction    Outbound `
+                    -Action       Block `
+                    -Program      $Exe.FullName `
+                    -Profile      Any `
+                    -Enabled      True `
+                    -Description  "Blocked by SSJMUK automation script" `
+                    -ErrorAction  Stop | Out-Null
+
+                Write-Log "  Blocked: $RelPath" "SUCCESS"
+                $TotalBlocked++
+
+            } catch {
+                Write-Log "  Failed to create rule for '$RelPath': $($_.Exception.Message)" "ERROR"
+                $AnyFailed = $true
+            }
+        }
+
+        Write-Log "  Done scanning [$($Scan.Label)]: $($Exes.Count) exe(s) processed" "INFO"
+    }
+
+    Write-Log "Total rules created: $TotalBlocked" "INFO"
+
+    if ($AnyFailed) {
+        Write-Log "Step 6 completed with some errors" "WARNING"
+        return $false
+    }
+
+    Write-Log "Step 6 completed successfully" "SUCCESS"
+    return $true
+}
 #endregion
 
 #region Main Execution
@@ -563,6 +648,11 @@ try {
         $Step5Result = Invoke-Step5-RestartService
         $ScriptResults.Add(@{ Name = "Step5-RestartWazuhService"; Success = $Step5Result; Required = $false })
         if (-not $Step5Result) { Write-Log "Step 5 failed (non-critical)" "WARNING" }
+
+        # Step 6
+        $Step6Result = Invoke-Step6-BlockFoxitFirewall
+        $ScriptResults.Add(@{ Name = "Step6-BlockFoxitFirewall"; Success = $Step6Result; Required = $false })
+        if (-not $Step6Result) { Write-Log "Step 6 failed (non-critical)" "WARNING" }
     }
 
     # Summary log

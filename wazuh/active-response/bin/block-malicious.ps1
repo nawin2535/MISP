@@ -1,6 +1,7 @@
 ################################
 ## Wazuh Active Response (FINAL)
 ## Supports: MISP + Sysmon + FIM
+## Sysmon Events: 1, 3, 6, 7, 15, 22, 26, 29
 ################################
 
 $logFile = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
@@ -388,6 +389,168 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "15") {
         }
     } else {
         Log-Detail "targetFile not found: $targetFile"
+    }
+}
+
+# =========================
+# 5e. FILE RESPONSE (Sysmon Event 29 - File Executable Detected)
+# =========================
+# Event 29: Sysmon ตรวจเจอไฟล์ executable ถูกเขียนลง disk
+# ใช้ targetFilename + hashes เหมือน Event 15
+# ไฟล์ยังอยู่บน disk → verify hash แล้วลบทิ้ง
+
+if ($IOCtype -eq "sha256" -and $eventID -eq "29") {
+
+    $targetFile = $alert.data.win.eventdata.targetFilename
+    Log-Detail "Event 29 (File Executable Detected): $targetFile"
+
+    if ($targetFile -and (Test-Path $targetFile)) {
+        try {
+            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
+            Log-Detail "File hash: $fileHash"
+            Log-Detail "IOC hash:  $IOCvalue"
+
+            if ($fileHash -eq $IOCvalue) {
+                Log-Detail "HASH MATCH (Event 29) → kill parent process then delete"
+
+                # Kill process ที่เขียนไฟล์นี้ (image = parent process)
+                $parentImage = $alert.data.win.eventdata.image
+                if ($parentImage) {
+                    try {
+                        $procs = Get-CimInstance Win32_Process | Where-Object {
+                            $_.ExecutablePath -eq $parentImage
+                        }
+                        foreach ($p in $procs) {
+                            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                            Log-Detail "Killed parent process PID: $($p.ProcessId) ($parentImage)"
+                        }
+                    } catch {
+                        Log-Detail "Kill parent process failed: $($_.Exception.Message)"
+                    }
+                }
+
+                # Kill process ใดๆ ที่รันไฟล์นี้อยู่แล้ว
+                try {
+                    $procs2 = Get-CimInstance Win32_Process | Where-Object {
+                        $_.ExecutablePath -eq $targetFile
+                    }
+                    foreach ($p in $procs2) {
+                        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                        Log-Detail "Killed running target PID: $($p.ProcessId)"
+                    }
+                } catch {
+                    Log-Detail "Kill target process failed: $($_.Exception.Message)"
+                }
+
+                Start-Sleep -Seconds 2
+
+                # ลบไฟล์
+                try {
+                    Remove-Item $targetFile -Force
+                    Log-Detail "Deleted (Event 29): $targetFile"
+                } catch {
+                    # ถ้าลบไม่ได้ทันที ให้ schedule ลบตอน reboot
+                    try {
+                        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class FileHelper29 {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool MoveFileEx(string lpExistingFileName,
+        string lpNewFileName, int dwFlags);
+    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
+}
+"@ -ErrorAction SilentlyContinue
+                        $result = [FileHelper29]::MoveFileEx($targetFile, $null,
+                            [FileHelper29]::MOVEFILE_DELAY_UNTIL_REBOOT)
+                        if ($result) {
+                            Log-Detail "Scheduled delete on reboot (Event 29): $targetFile"
+                        } else {
+                            Log-Detail "MoveFileEx failed (Event 29)"
+                        }
+                    } catch {
+                        Log-Detail "Schedule delete failed (Event 29): $($_.Exception.Message)"
+                    }
+                }
+
+            } else {
+                Log-Detail "Hash mismatch (Event 29) - no action"
+            }
+        } catch {
+            Log-Detail "Event 29 handling error: $($_.Exception.Message)"
+        }
+    } else {
+        Log-Detail "targetFile not found (Event 29): $targetFile"
+    }
+}
+
+# =========================
+# 5f. FILE RESPONSE (Sysmon Event 26 - File Delete Detected)
+# =========================
+# Event 26: Sysmon บันทึกว่าไฟล์ถูกลบไปแล้ว (อาจถูก archive ไว้ใน Sysmon archive dir)
+# ไฟล์ต้นทางหายแล้ว → ตรวจสอบ Sysmon archive แล้วลบทิ้ง + log ไว้เป็นหลักฐาน
+
+if ($IOCtype -eq "sha256" -and $eventID -eq "26") {
+
+    $targetFile = $alert.data.win.eventdata.targetFilename
+    Log-Detail "Event 26 (File Delete Detected): $targetFile"
+
+    # ตรวจว่าไฟล์ต้นทางยังหลงเหลืออยู่หรือไม่ (บางกรณี Sysmon log ช้า)
+    if ($targetFile -and (Test-Path $targetFile)) {
+        try {
+            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
+            Log-Detail "File hash (still present): $fileHash"
+            Log-Detail "IOC hash: $IOCvalue"
+
+            if ($fileHash -eq $IOCvalue) {
+                Log-Detail "HASH MATCH (Event 26) - original file still exists → delete"
+                try {
+                    Remove-Item $targetFile -Force
+                    Log-Detail "Deleted original file (Event 26): $targetFile"
+                } catch {
+                    Log-Detail "Delete failed (Event 26): $($_.Exception.Message)"
+                }
+            } else {
+                Log-Detail "Hash mismatch (Event 26) - no action on original"
+            }
+        } catch {
+            Log-Detail "Event 26 hash check error: $($_.Exception.Message)"
+        }
+    } else {
+        Log-Detail "Original file already gone (Event 26) - checking Sysmon archive"
+    }
+
+    # ตรวจ Sysmon archive directory (default: C:\Sysmon\)
+    # Sysmon จะ archive ไฟล์ที่ถูกลบในชื่อ SHA256 hash ของไฟล์นั้น
+    $sysmonArchiveDirs = @(
+        "C:\Sysmon",
+        "C:\Windows\Sysmon",
+        "C:\ProgramData\Sysmon"
+    )
+
+    foreach ($archiveDir in $sysmonArchiveDirs) {
+        if (Test-Path $archiveDir) {
+            $archivedFile = Join-Path $archiveDir $IOCvalue
+            if (Test-Path $archivedFile) {
+                try {
+                    Remove-Item $archivedFile -Force
+                    Log-Detail "Deleted Sysmon archive copy (Event 26): $archivedFile"
+                } catch {
+                    Log-Detail "Delete archive failed (Event 26): $($_.Exception.Message)"
+                }
+            } else {
+                Log-Detail "No archive copy found at: $archivedFile"
+            }
+        }
+    }
+
+    # Kill process ที่อาจเป็นต้นเหตุการลบไฟล์ (image = process ที่สั่ง delete)
+    $parentImage = $alert.data.win.eventdata.image
+    if ($parentImage) {
+        Log-Detail "Event 26 triggered by process: $parentImage"
+        # ไม่ kill โดยอัตโนมัติ เพราะ process อาจเป็น legitimate tool
+        # แต่ log ไว้เพื่อ investigation
+        Log-Detail "NOTE: Review process '$parentImage' manually if suspicious"
     }
 }
 

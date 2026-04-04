@@ -549,10 +549,14 @@ function Invoke-Step6-BlockFoxitFirewall {
             $RuleName    = "Block Foxit [$($Scan.Label)] $RelPath Outbound"
 
             try {
-                # ลบ rule เดิมถ้ามีอยู่ (idempotent)
-                $Existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
-                if ($Existing) {
-                    Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+                # ใช้ Where-Object นับจำนวนจริง -- Get-NetFirewallRule ไม่ throw เมื่อไม่เจอ rule
+                # จึงตรวจด้วย Count แทนการ cast เป็น bool
+                $ExistingRules = @(Get-NetFirewallRule -ErrorAction SilentlyContinue |
+                    Where-Object { $_.DisplayName -eq $RuleName })
+
+                if ($ExistingRules.Count -gt 0) {
+                    Write-Log "  Rule already exists ($($ExistingRules.Count) copy) - skipping: $RelPath" "INFO"
+                    continue
                 }
 
                 New-NetFirewallRule `

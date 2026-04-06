@@ -103,10 +103,28 @@ function Send-DiscordSummary {
     # เพิ่ม WARNING/ERROR/SUCCESS log (จำกัด 10 บรรทัด)
     $ImportantLogs = $script:LogBuffer | Select-Object -Last 10
 
+    # ดึง IPv4 address จาก adapter ที่ Up และไม่ใช่ loopback
+    <# $IPAddress = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceAlias -notmatch 'Loopback' -and $_.IPAddress -ne '127.0.0.1' } |
+        Select-Object -First 1).IPAddress #>
+    $IPAddress = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like '192.168.*' -and ($_.InterfaceAlias -like 'wi*' -or $_.InterfaceAlias -like 'ether*') } | Select-Object -First 1).IPAddress
+    if (-not $IPAddress) {
+        # not use in org network
+        $IPAddress = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -like 'wi*' } | Select-Object -First 1).IPAddress
+
+        if (-not $IPAddress) {$IPAddress = "N/A" }
+    
+    }
+
     $Fields = @(
         @{
             name   = "Computer"
             value  = "``$env:COMPUTERNAME``"
+            inline = $true
+        },
+        @{
+            name   = "IP Address"
+            value  = "``$IPAddress``"
             inline = $true
         },
         @{
@@ -510,6 +528,7 @@ function Invoke-Step6-BlockFoxitFirewall {
 
     # Resolve base paths - ครอบคลุมทุก product ใน Foxit Software folder
     $PF86    = ${env:ProgramFiles(x86)}
+    $PF64    = ${env:ProgramFiles}
     $AppData = $env:APPDATA
 
     if (-not $PF86) {
@@ -519,7 +538,8 @@ function Invoke-Step6-BlockFoxitFirewall {
 
     # Scan root "Foxit Software" ทั้งสอง location - recursive ครอบทุก product
     $ScanPaths = @(
-        @{ Label = "ProgramFiles"; Path = Join-Path $PF86    "Foxit Software" },
+        @{ Label = "ProgramFiles(x86)"; Path = Join-Path $PF86    "Foxit Software" },
+        @{ Label = "ProgramFiles"; Path = Join-Path $PF64    "Foxit Software" },
         @{ Label = "AppData";      Path = Join-Path $AppData "Foxit Software" }
     )
 

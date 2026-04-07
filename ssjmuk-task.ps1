@@ -19,6 +19,11 @@ $GitHubBaseUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/ma
 # Discord Webhook
 $DiscordWebhookUrl = "https://discord.com/api/webhooks/1485825229547901110/tGVBhaf47J26DYuWaxlaHvUzXF3iKop1TxqSCSFPUn_nEx-2iJTbMRctZfjgYrtMGaFY"
 
+# Step 7: Wazuh Agent Upgrade Configuration
+# แก้ไขค่านี้เมื่อต้องการ upgrade เป็น version ใหม่
+$VersionWazuh  = "4.14.4"
+$URL_Download  = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.4-1.msi"
+
 # Scripts to download from GitHub before execution
 $ScriptsToDownload = @(
     @{
@@ -611,6 +616,141 @@ function Invoke-Step6-BlockFoxitFirewall {
     Write-Log "Step 6 completed successfully" "SUCCESS"
     return $true
 }
+
+function Invoke-Step7-UpgradeWazuhAgent {
+    param(
+        [Parameter(Mandatory=$true)] [string]$TargetVersion,
+        [Parameter(Mandatory=$true)] [string]$DownloadUrl
+    )
+
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 7: Upgrade Wazuh Agent" "INFO"
+    Write-Log "Target Version : $TargetVersion" "INFO"
+    Write-Log "Download URL   : $DownloadUrl" "INFO"
+    Write-Log "========================================" "INFO"
+
+    # ── 1. ตรวจ version ปัจจุบันจาก wazuh-agent.exe PE header ──────────────────
+    $AgentDir  = "${env:ProgramFiles(x86)}\ossec-agent"
+    $AgentExe  = Join-Path $AgentDir "wazuh-agent.exe"
+
+    if (-not (Test-Path $AgentExe)) {
+        Write-Log "Wazuh Agent not found at '$AgentExe'. Skipping upgrade." "WARNING"
+        return $false
+    }
+
+    try {
+        $CurrentVersion = (Get-Item $AgentExe -ErrorAction Stop).VersionInfo.ProductVersion -replace '^v',''
+        if (-not $CurrentVersion) {
+            Write-Log "ProductVersion is empty in wazuh-agent.exe. Cannot determine current version." "ERROR"
+            return $false
+        }
+        Write-Log "Current version : $CurrentVersion (from wazuh-agent.exe ProductVersion)" "INFO"
+        Write-Log "Target  version : $TargetVersion" "INFO"
+    } catch {
+        Write-Log "Failed to read version from wazuh-agent.exe: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+
+    # เปรียบเทียบด้วย [System.Version] เพื่อรองรับ semantic versioning
+    try {
+        $CurrentVer = [System.Version]$CurrentVersion
+        $TargetVer  = [System.Version]$TargetVersion
+    } catch {
+        Write-Log "Version parse error - current='$CurrentVersion' target='$TargetVersion': $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+
+    if ($CurrentVer -ge $TargetVer) {
+        Write-Log "Already at version $CurrentVersion (>= $TargetVersion). No upgrade needed." "SUCCESS"
+        return $true
+    }
+
+    Write-Log "Upgrade required: $CurrentVersion -> $TargetVersion" "INFO"
+
+    # ── 2. ตรวจ internet ก่อน download ────────────────────────────────────────
+    if (-not (Test-InternetConnection)) {
+        Write-Log "No internet connection. Cannot download installer." "ERROR"
+        return $false
+    }
+
+    # ── 3. Download MSI ────────────────────────────────────────────────────────
+    $MsiFileName = Split-Path $DownloadUrl -Leaf
+    $TempDir     = Join-Path $env:TEMP "WazuhUpgrade"
+    $MsiPath     = Join-Path $TempDir $MsiFileName
+
+    try {
+        if (-not (Test-Path $TempDir)) {
+            New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
+        }
+        Write-Log "Downloading installer to: $MsiPath" "INFO"
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $DownloadUrl -OutFile $MsiPath -UseBasicParsing -ErrorAction Stop
+        $MsiBytes = (Get-Item $MsiPath).Length
+        $MsiSize  = [math]::Round($MsiBytes / 1048576, 2)
+        Write-Log "Download complete: $MsiSize MB" "SUCCESS"
+    } catch {
+        Write-Log "Download failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+
+    # ── 4. Run installer (Wazuh docs: .\wazuh-agent-x.x.x-1.msi /q) ──────────
+    # /q  = quiet (no UI)
+    # /norestart = ไม่ reboot อัตโนมัติ
+    Write-Log "Running installer: $MsiPath /q" "INFO"
+    try {
+        $InstallArgs = "/i `"$MsiPath`" /q /norestart"
+        $Process = Start-Process -FilePath "msiexec.exe" `
+                                 -ArgumentList $InstallArgs `
+                                 -Wait -PassThru -ErrorAction Stop
+        Write-Log "Installer exited with code: $($Process.ExitCode)" "INFO"
+
+        # msiexec exit codes: 0 = success, 3010 = success + reboot required
+        if ($Process.ExitCode -eq 0 -or $Process.ExitCode -eq 3010) {
+            if ($Process.ExitCode -eq 3010) {
+                Write-Log "Installer requests reboot - please restart the machine when convenient." "WARNING"
+            }
+        } else {
+            Write-Log "Installer returned non-zero exit code: $($Process.ExitCode)" "ERROR"
+            return $false
+        }
+    } catch {
+        Write-Log "Failed to run installer: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+
+    # ── 5. Verify version หลัง upgrade ────────────────────────────────────────
+    Start-Sleep -Seconds 5   # รอ installer replace wazuh-agent.exe เสร็จ
+    try {
+        $NewVersion = (Get-Item $AgentExe -ErrorAction Stop).VersionInfo.ProductVersion -replace '^v',''
+        Write-Log "Installed version: $NewVersion (from wazuh-agent.exe ProductVersion)" "INFO"
+
+        if ([System.Version]$NewVersion -ge $TargetVer) {
+            Write-Log "Upgrade verified successfully: $CurrentVersion -> $NewVersion" "SUCCESS"
+        } else {
+            Write-Log "Version after install ($NewVersion) is still lower than target ($TargetVersion)" "WARNING"
+        }
+    } catch {
+        Write-Log "Could not verify version after install: $($_.Exception.Message)" "WARNING"
+    }
+
+    # ── 6. Restart Wazuh service ───────────────────────────────────────────────
+    Write-Log "Restarting WazuhSvc after upgrade..." "INFO"
+    $RestartOk = Invoke-Step5-RestartService
+    if (-not $RestartOk) {
+        Write-Log "Service restart failed after upgrade - manual check required." "WARNING"
+    }
+
+    # ── 7. Cleanup temp file ───────────────────────────────────────────────────
+    try {
+        Remove-Item $MsiPath -Force -ErrorAction SilentlyContinue
+        Write-Log "Cleaned up temp installer: $MsiPath" "INFO"
+    } catch {
+        Write-Log "Could not remove temp file '$MsiPath': $($_.Exception.Message)" "WARNING"
+    }
+
+    Write-Log "Step 7 completed successfully" "SUCCESS"
+    return $true
+}
 #endregion
 
 #region Main Execution
@@ -677,6 +817,11 @@ try {
         $Step6Result = Invoke-Step6-BlockFoxitFirewall
         $ScriptResults.Add(@{ Name = "Step6-BlockFoxitFirewall"; Success = $Step6Result; Required = $false })
         if (-not $Step6Result) { Write-Log "Step 6 failed (non-critical)" "WARNING" }
+
+        # Step 7
+        $Step7Result = Invoke-Step7-UpgradeWazuhAgent -TargetVersion $VersionWazuh -DownloadUrl $URL_Download
+        $ScriptResults.Add(@{ Name = "Step7-UpgradeWazuhAgent"; Success = $Step7Result; Required = $false })
+        if (-not $Step7Result) { Write-Log "Step 7 failed (non-critical)" "WARNING" }
     }
 
     # Summary log

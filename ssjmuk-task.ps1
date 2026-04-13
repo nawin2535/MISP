@@ -751,6 +751,138 @@ function Invoke-Step7-UpgradeWazuhAgent {
     Write-Log "Step 7 completed successfully" "SUCCESS"
     return $true
 }
+
+function Invoke-Step8-RotateLogs {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 8: Log Rotation (90-day retention)" "INFO"
+    Write-Log "========================================" "INFO"
+
+    $RetentionDays = 90
+    $CutoffDate    = (Get-Date).AddDays(-$RetentionDays)
+    $AnyFailed     = $false
+
+    # ── 8a. Sysmon install logs: C:\install-sysmon\logs ──────────────────────────
+    $SysmonLogDir = $LogDir
+    Write-Log "8a: Rotating Sysmon logs at: $SysmonLogDir" "INFO"
+
+    if (Test-Path $SysmonLogDir) {
+        try {
+            $OldFiles = Get-ChildItem -Path $SysmonLogDir -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $CutoffDate }
+
+            if ($OldFiles -and $OldFiles.Count -gt 0) {
+                $DeleteCount = 0
+                foreach ($File in $OldFiles) {
+                    try {
+                        Remove-Item -Path $File.FullName -Force -ErrorAction Stop
+                        $DeleteCount++
+                    } catch {
+                        Write-Log "  Failed to delete '$($File.FullName)': $($_.Exception.Message)" "WARNING"
+                        $AnyFailed = $true
+                    }
+                }
+                Write-Log "8a: Deleted $DeleteCount file(s) older than $RetentionDays days from $SysmonLogDir" "SUCCESS"
+            } else {
+                Write-Log "8a: No files older than $RetentionDays days found in $SysmonLogDir" "INFO"
+            }
+        } catch {
+            Write-Log "8a: Error scanning $SysmonLogDir - $($_.Exception.Message)" "WARNING"
+            $AnyFailed = $true
+        }
+    } else {
+        Write-Log "8a: Sysmon log directory not found, skipping: $SysmonLogDir" "WARNING"
+    }
+
+    # ── 8b. Wazuh active-responses.log rotation ───────────────────────────────────
+    # Strategy:
+    #   1. If active-responses.log exists and is NOT from today, rename it to active-responses.log.YYYYMMDD
+    #   2. Delete archived files older than 90 days
+    #   3. The current active-responses.log (today's) is untouched by Wazuh
+    $ArDir      = "${env:ProgramFiles(x86)}\ossec-agent\active-response"
+    $LiveLog    = Join-Path $ArDir "active-responses.log"
+    $TodayStamp = Get-Date -Format "yyyyMMdd"
+
+    Write-Log "8b: Rotating active-responses.log at: $ArDir" "INFO"
+
+    if (Test-Path $ArDir) {
+
+        # Rotate the live log if it exists and was last written before today
+        if (Test-Path $LiveLog) {
+            $LiveLogDate = (Get-Item $LiveLog).LastWriteTime.Date
+            $TodayDate   = (Get-Date).Date
+
+            if ($LiveLogDate -lt $TodayDate) {
+                $ArchiveName = "active-responses.log.$((Get-Item $LiveLog).LastWriteTime.ToString('yyyyMMdd'))"
+                $ArchivePath = Join-Path $ArDir $ArchiveName
+
+                # Avoid overwriting an existing archive for that date
+                if (-not (Test-Path $ArchivePath)) {
+                    try {
+                        Rename-Item -Path $LiveLog -NewName $ArchiveName -ErrorAction Stop
+                        Write-Log "8b: Rotated active-responses.log -> $ArchiveName" "SUCCESS"
+                        # สร้างไฟล์หลักว่างเปล่าไว้รองรับ Wazuh active response ที่จะเกิดขึ้น
+                        New-Item -ItemType File -Path $LiveLog -Force -ErrorAction Stop | Out-Null
+                        Write-Log "8b: Created new empty active-responses.log" "INFO"
+                    } catch {
+                        Write-Log "8b: Failed to rotate active-responses.log: $($_.Exception.Message)" "WARNING"
+                        $AnyFailed = $true
+                    }
+                } else {
+                    # Archive for that date already exists - append content then clear live log
+                    try {
+                        $LiveContent = Get-Content -Path $LiveLog -Raw -ErrorAction Stop
+                        Add-Content -Path $ArchivePath -Value $LiveContent -ErrorAction Stop
+                        Clear-Content -Path $LiveLog -ErrorAction Stop
+                        Write-Log "8b: Appended to existing archive $ArchiveName and cleared live log" "SUCCESS"
+                    } catch {
+                        Write-Log "8b: Failed to merge into existing archive: $($_.Exception.Message)" "WARNING"
+                        $AnyFailed = $true
+                    }
+                }
+            } else {
+                Write-Log "8b: active-responses.log is from today - no rotation needed" "INFO"
+            }
+        } else {
+            Write-Log "8b: active-responses.log not found at $LiveLog" "INFO"
+        }
+
+        # Delete archived files older than 90 days (pattern: active-responses.log.YYYYMMDD)
+        try {
+            $OldArchives = Get-ChildItem -Path $ArDir -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^active-responses\.log\.\d{8}$' -and $_.LastWriteTime -lt $CutoffDate }
+
+            if ($OldArchives -and $OldArchives.Count -gt 0) {
+                $DeleteCount = 0
+                foreach ($Archive in $OldArchives) {
+                    try {
+                        Remove-Item -Path $Archive.FullName -Force -ErrorAction Stop
+                        $DeleteCount++
+                    } catch {
+                        Write-Log "  Failed to delete archive '$($Archive.Name)': $($_.Exception.Message)" "WARNING"
+                        $AnyFailed = $true
+                    }
+                }
+                Write-Log "8b: Deleted $DeleteCount archive file(s) older than $RetentionDays days" "SUCCESS"
+            } else {
+                Write-Log "8b: No archives older than $RetentionDays days found" "INFO"
+            }
+        } catch {
+            Write-Log "8b: Error scanning archives in $ArDir - $($_.Exception.Message)" "WARNING"
+            $AnyFailed = $true
+        }
+
+    } else {
+        Write-Log "8b: ossec-agent active-response directory not found, skipping: $ArDir" "WARNING"
+    }
+
+    if ($AnyFailed) {
+        Write-Log "Step 8 completed with some warnings" "WARNING"
+        return $false
+    }
+
+    Write-Log "Step 8 completed successfully" "SUCCESS"
+    return $true
+}
 #endregion
 
 #region Main Execution
@@ -822,6 +954,11 @@ try {
         $Step7Result = Invoke-Step7-UpgradeWazuhAgent -TargetVersion $VersionWazuh -DownloadUrl $URL_Download
         $ScriptResults.Add(@{ Name = "Step7-UpgradeWazuhAgent"; Success = $Step7Result; Required = $false })
         if (-not $Step7Result) { Write-Log "Step 7 failed (non-critical)" "WARNING" }
+
+        # Step 8
+        $Step8Result = Invoke-Step8-RotateLogs
+        $ScriptResults.Add(@{ Name = "Step8-RotateLogs"; Success = $Step8Result; Required = $false })
+        if (-not $Step8Result) { Write-Log "Step 8 failed (non-critical)" "WARNING" }
     }
 
     # Summary log

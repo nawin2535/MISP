@@ -48,6 +48,9 @@ $ScriptsToRun = @(
 # Buffer เก็บ log ทั้งหมดสำหรับส่ง Discord ตอนจบ
 $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
 
+# Step 7: เก็บ version info สำหรับแสดงใน Discord summary
+$script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หรือ "4.14.5 (up-to-date)"
+
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)]
@@ -102,7 +105,12 @@ function Send-DiscordSummary {
     $SummaryLines = $Results | ForEach-Object {
         $icon = if ($_.Success) { $iconOK } else { $iconFail }
         $req  = if ($_.Required) { "(Required)" } else { "(Optional)" }
-        "$icon $($_.Name) $req"
+        $line = "$icon $($_.Name) $req"
+        # เพิ่ม version info สำหรับ Step 7
+        if ($_.Name -eq "Step7-UpgradeWazuhAgent" -and $script:WazuhVersionInfo) {
+            $line += " [$script:WazuhVersionInfo]"
+        }
+        $line
     }
 
     # เพิ่ม WARNING/ERROR/SUCCESS log (จำกัด 10 บรรทัด)
@@ -121,6 +129,20 @@ function Send-DiscordSummary {
     
     }
 
+    # ดึง Wazuh Agent Name จาก ossec.conf
+    $OssecConf    = "${env:ProgramFiles(x86)}\ossec-agent\ossec.conf"
+    $AgentName    = "N/A"
+    if (Test-Path $OssecConf) {
+        try {
+            $ConfContent = Get-Content -Path $OssecConf -Raw -ErrorAction Stop
+            if ($ConfContent -match '<agent_name>([^<]+)</agent_name>') {
+                $AgentName = $Matches[1].Trim()
+            }
+        } catch {
+            $AgentName = "N/A"
+        }
+    }
+
     $Fields = @(
         @{
             name   = "Computer"
@@ -136,6 +158,11 @@ function Send-DiscordSummary {
             name   = "User"
             value  = "``$env:USERNAME``"
             inline = $true
+        },
+        @{
+            name   = "Agent Name"
+            value  = "``$AgentName``"
+            inline = $false
         },
         @{
             name   = "Time"
@@ -662,6 +689,7 @@ function Invoke-Step7-UpgradeWazuhAgent {
 
     if ($CurrentVer -ge $TargetVer) {
         Write-Log "Already at version $CurrentVersion (>= $TargetVersion). No upgrade needed." "SUCCESS"
+        $script:WazuhVersionInfo = "v$CurrentVersion (up-to-date)"
         return $true
     }
 
@@ -726,8 +754,10 @@ function Invoke-Step7-UpgradeWazuhAgent {
 
         if ([System.Version]$NewVersion -ge $TargetVer) {
             Write-Log "Upgrade verified successfully: $CurrentVersion -> $NewVersion" "SUCCESS"
+            $script:WazuhVersionInfo = "v$CurrentVersion → v$NewVersion"
         } else {
             Write-Log "Version after install ($NewVersion) is still lower than target ($TargetVersion)" "WARNING"
+            $script:WazuhVersionInfo = "v$CurrentVersion → v$NewVersion (verify failed)"
         }
     } catch {
         Write-Log "Could not verify version after install: $($_.Exception.Message)" "WARNING"

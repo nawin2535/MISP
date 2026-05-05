@@ -472,6 +472,25 @@ function Invoke-Step4-DownloadActiveResponse {
         return $false
     }
 
+    # Download Invoke-DFIRCollection.ps1 → C:\install-sysmon\
+    $DFIRScriptUrl  = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/Invoke-DFIRCollection.ps1"
+    $DFIRScriptDir  = "C:\install-sysmon"
+    $SaveDFIRScript = Join-Path $DFIRScriptDir "Invoke-DFIRCollection.ps1"
+
+    Write-Log "Downloading Invoke-DFIRCollection.ps1 to $DFIRScriptDir..." "INFO"
+    try {
+        if (-not (Test-Path $DFIRScriptDir)) {
+            New-Item -ItemType Directory -Path $DFIRScriptDir -Force | Out-Null
+            Write-Log "Created directory: $DFIRScriptDir" "INFO"
+        }
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $DFIRScriptUrl -OutFile $SaveDFIRScript -UseBasicParsing -ErrorAction Stop
+        Write-Log "Downloaded Invoke-DFIRCollection.ps1 ($([math]::Round((Get-Item $SaveDFIRScript).Length/1KB, 2)) KB)" "SUCCESS"
+    } catch {
+        Write-Log "Failed to download Invoke-DFIRCollection.ps1: $($_.Exception.Message)" "WARNING"
+        # non-critical: block-malicious.ps1 ยังทำงานได้ แค่ DFIR background จะไม่รัน
+    }
+
     Write-Log "Step 4 completed successfully" "SUCCESS"
     return $true
 }

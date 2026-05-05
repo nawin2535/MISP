@@ -2,9 +2,15 @@
 ## Wazuh Active Response (FINAL)
 ## Supports: MISP + Sysmon + FIM
 ## Sysmon Events: 1, 3, 6, 7, 15, 22, 26, 29
+## DFIR Collection: C:\install-sysmon\dfir-found\ (background job)
+##
+## Architecture:
+##   Main script  -> IOC extract -> kill/delete -> return (~2 sec)
+##   Invoke-DFIRCollection.ps1 -> background job แยก ไม่ block main
 ################################
 
-$logFile = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
+$logFile    = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
+$dfirScript = "C:\install-sysmon\Invoke-DFIRCollection.ps1"
 
 function Log-Detail {
     param([string]$msg)
@@ -12,654 +18,313 @@ function Log-Detail {
     "$timestamp - $msg" | Out-File -FilePath $logFile -Append -Encoding utf8
 }
 
+function Start-DFIRBackground {
+    param(
+        [string]$EventType,
+        [string]$IOCValue,
+        [string]$IOCType,
+        [string]$AlertJson,
+        [string]$TargetFile    = "",
+        [string]$ProcessImage  = "",
+        [string]$ProcessId     = "",
+        [string]$ParentImage   = "",
+        [string]$DestinationIp = "",
+        [string]$Domain        = "",
+        [string]$AgentName     = ""
+    )
+    try {
+        $tmpDir  = "C:\install-sysmon\dfir-tmp"
+        if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null }
+        $ts      = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+        $tmpFile = Join-Path $tmpDir "alert_${ts}.json"
+        $AlertJson | Out-File -FilePath $tmpFile -Encoding utf8 -Force
+
+        $argList = "-NonInteractive -NoProfile -ExecutionPolicy Bypass" +
+            " -File `"$dfirScript`"" +
+            " -EventType `"$EventType`"" +
+            " -IOCValue `"$IOCValue`"" +
+            " -IOCType `"$IOCType`"" +
+            " -AlertFile `"$tmpFile`"" +
+            " -TargetFile `"$TargetFile`"" +
+            " -ProcessImage `"$ProcessImage`"" +
+            " -ProcessId `"$ProcessId`"" +
+            " -ParentImage `"$ParentImage`"" +
+            " -DestinationIp `"$DestinationIp`"" +
+            " -Domain `"$Domain`"" +
+            " -AgentName `"$AgentName`""
+
+        Start-Process -FilePath "powershell.exe" -ArgumentList $argList -WindowStyle Hidden -ErrorAction SilentlyContinue
+        Log-Detail "DFIR: Background started (EventType=$EventType IOC=$IOCValue)"
+    } catch {
+        Log-Detail "DFIR: Launch failed: $($_.Exception.Message)"
+    }
+}
+
 Log-Detail "=== AR SCRIPT STARTED (PowerShell) ==="
 
-# =========================
 # 1. Read STDIN
-# =========================
 $inputJson = ""
-
 try {
     [Console]::InputEncoding = [System.Text.Encoding]::UTF8
     $inputJson = Read-Host
     Log-Detail "Read-Host success. Length: $($inputJson.Length)"
-} catch {
-    Log-Detail "Read-Host failed: $($_.Exception.Message)"
-}
+} catch { Log-Detail "Read-Host failed: $($_.Exception.Message)" }
 
-# fallback
 if ([string]::IsNullOrWhiteSpace($inputJson)) {
     try {
         $lines = @()
-        while ($line = [Console]::In.ReadLine()) {
-            $lines += $line
-        }
+        while ($line = [Console]::In.ReadLine()) { $lines += $line }
         $inputJson = $lines -join "`n"
         Log-Detail "Fallback read success. Length: $($inputJson.Length)"
-    } catch {
-        Log-Detail "Fallback failed"
-    }
+    } catch { Log-Detail "Fallback failed" }
 }
 
-if ([string]::IsNullOrWhiteSpace($inputJson)) {
-    Log-Detail "CRITICAL: Empty input"
-    exit 1
-}
+if ([string]::IsNullOrWhiteSpace($inputJson)) { Log-Detail "CRITICAL: Empty input"; exit 1 }
 
-# preview log
 $preview = if ($inputJson.Length -gt 2000) { $inputJson.Substring(0,2000) + "..." } else { $inputJson }
 Log-Detail "INPUT PREVIEW:"
 Log-Detail $preview
-#Log-Detail $inputJson
 
-# =========================
 # 2. Parse JSON
-# =========================
 try {
     $INPUT_ARRAY = $inputJson | ConvertFrom-Json
     Log-Detail "JSON parsed OK"
-} catch {
-    Log-Detail "JSON parse failed"
-    exit 1
-}
+} catch { Log-Detail "JSON parse failed"; exit 1 }
 
 $command = $INPUT_ARRAY.command
 $alert   = $INPUT_ARRAY.parameters.alert
 
-# =========================
-# 3. Extract IOC (3 Modes)
-# =========================
-$IOCvalue = $null
-$IOCtype  = $null
+# 3. Extract IOC
+$IOCvalue = $null; $IOCtype = $null; $IOCmode = $null
+$eventID    = $alert.data.win.system.eventID
+$hashes_val = $alert.data.win.eventdata.hashes
+$hash_val   = $alert.data.win.eventdata.hash
 
-# 🔴 Mode 1: MISP
-if ($alert.data.misp) {
-    $IOCvalue = $alert.data.misp.value
-    $IOCtype  = $alert.data.misp.type
-    Log-Detail "Mode: MISP"
+$hashField = $null; $hashFieldName = ""
+if ($eventID -in @("1","6","7","26","29") -and $hashes_val) { $hashField = $hashes_val; $hashFieldName = "hashes" }
+elseif ($eventID -eq "15" -and $hash_val)                    { $hashField = $hash_val;   $hashFieldName = "hash" }
+elseif ($hashes_val)                                          { $hashField = $hashes_val; $hashFieldName = "hashes(fb)" }
+elseif ($hash_val)                                            { $hashField = $hash_val;   $hashFieldName = "hash(fb)" }
+
+if ($hashField -and $hashField -match "SHA256=([A-Fa-f0-9]{64})") {
+    $IOCvalue = $matches[1].ToUpper(); $IOCtype = "sha256"; $IOCmode = "Sysmon"
+    Log-Detail "Mode A: Sysmon (EventID=$eventID field=$hashFieldName) IOC=$IOCvalue"
 }
-
-# 🟢 Mode 2: Sysmon - รองรับทั้ง .hash (Event 15) และ .hashes (Event 1,6,7)
-$eventID  = $alert.data.win.system.eventID
-$hashField = $alert.data.win.eventdata.hashes
-
-if (-not $hashField) {
-    $hashField = $alert.data.win.eventdata.hash
+if (-not $IOCvalue -and $alert.syscheck.sha256_after) {
+    $IOCvalue = ($alert.syscheck.sha256_after).ToUpper(); $IOCtype = "sha256"; $IOCmode = "FIM"
+    Log-Detail "Mode B: FIM IOC=$IOCvalue"
 }
-
-if ($hashField -match "SHA256=([A-Fa-f0-9]+)") {
-    $IOCvalue = $matches[1]
-    $IOCtype  = "sha256"
-    Log-Detail "Mode: Sysmon (EventID=$eventID)"
-}
-
-# 🟡 Mode 3: Syscheck (FIM)
-if ($alert.syscheck.sha256_after) {
-    $IOCvalue = $alert.syscheck.sha256_after
-    $IOCtype  = "sha256"
-    Log-Detail "Mode: Syscheck (FIM)"
-}
-
-
 if (-not $IOCvalue) {
-    Log-Detail "No IOC found → EXIT"
-    exit 0
+    if ($eventID -eq "3" -and $alert.data.win.eventdata.destinationIp) {
+        $IOCvalue = $alert.data.win.eventdata.destinationIp; $IOCtype = "ip"; $IOCmode = "Event3"
+        Log-Detail "Mode D: Event3 IP=$IOCvalue"
+    } elseif ($eventID -eq "22" -and $alert.data.win.eventdata.queryName) {
+        $IOCvalue = $alert.data.win.eventdata.queryName; $IOCtype = "domain"; $IOCmode = "Event22"
+        Log-Detail "Mode D: Event22 Domain=$IOCvalue"
+    }
 }
+if (-not $IOCvalue) { Log-Detail "No IOC - EXIT"; exit 0 }
+Log-Detail "IOC FINAL: $IOCvalue ($IOCtype) mode=$IOCmode"
 
-Log-Detail "IOC: $IOCvalue"
-
-# =========================
 # 4. Extract Fields
-# =========================
+$agentName       = $alert.agent.name
+$imagePathGlobal = $alert.data.win.eventdata.image
+$processId       = $alert.data.win.eventdata.processId
+$parentImage     = $alert.data.win.eventdata.parentImage
+$commandLine     = $alert.data.win.eventdata.commandLine
+$userName        = $alert.data.win.eventdata.user
+$filePath        = $alert.syscheck.path
+Log-Detail "Image(global): $imagePathGlobal | Syscheck: $filePath | Agent: $agentName"
 
-# Sysmon
-$imagePath  = $alert.data.win.eventdata.image
-$processId  = $alert.data.win.eventdata.processId
+$handledBySpecificBlock = $eventID -in @("1","6","7","15","26","29")
 
-# Syscheck
-$filePath   = $alert.syscheck.path
-
-Log-Detail "Sysmon Image: $imagePath"
-Log-Detail "Syscheck Path: $filePath"
-
-# =========================
-# 5. FILE RESPONSE (Sysmon)
-# =========================
-if ($IOCtype -eq "sha256" -and $imagePath) {
-
-    if (Test-Path $imagePath) {
-
+# 5. Generic fallback
+if ($IOCtype -eq "sha256" -and $imagePathGlobal -and -not $handledBySpecificBlock) {
+    if (Test-Path $imagePathGlobal) {
         try {
-            $fileHash = (Get-FileHash $imagePath -Algorithm SHA256).Hash
-
-            if ($fileHash -eq $IOCvalue) {
-
-                Log-Detail "Sysmon HASH MATCH → action"
-
-                if ($processId) {
-                    try {
-                        Stop-Process -Id $processId -Force
-                        Log-Detail "Killed PID: $processId"
-                    } catch {
-                        Log-Detail "Kill failed"
-                    }
-                }
-
-                try {
-                    Remove-Item $imagePath -Force
-                    Log-Detail "Deleted file: $imagePath"
-                } catch {
-                    Log-Detail "Delete failed"
-                }
-            }
-
-        } catch {
-            Log-Detail "Sysmon handling error"
-        }
+            $fh = (Get-FileHash $imagePathGlobal -Algorithm SHA256).Hash.ToUpper()
+            if ($fh -eq $IOCvalue) {
+                Log-Detail "Generic HASH MATCH (EventID=$eventID)"
+                Start-DFIRBackground -EventType "Sysmon_Generic_${eventID}" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $imagePathGlobal -ProcessImage $imagePathGlobal -ProcessId $processId -AgentName $agentName
+                if ($processId) { try { Stop-Process -Id $processId -Force; Log-Detail "Killed PID: $processId" } catch {} }
+                try { Remove-Item $imagePathGlobal -Force; Log-Detail "Deleted: $imagePathGlobal" } catch { Log-Detail "Delete failed: $($_.Exception.Message)" }
+            } else { Log-Detail "Generic: hash mismatch" }
+        } catch { Log-Detail "Generic error: $($_.Exception.Message)" }
     }
 }
 
-
-# =========================
-# 5b. PROCESS RESPONSE (Sysmon Event 1)
-# =========================
-# $eventID = $alert.data.win.system.eventID
-
+# 5b. Event 1
 if ($IOCtype -eq "sha256" -and $eventID -eq "1") {
-    $imagePath = $alert.data.win.eventdata.image
-    $processId = $alert.data.win.eventdata.processId
+    $ev1_img = $alert.data.win.eventdata.image
+    $ev1_pid = $alert.data.win.eventdata.processId
+    Log-Detail "Event 1: $ev1_img (PID=$ev1_pid)"
+    $ev1_match = $false
+    if ($ev1_img -and (Test-Path $ev1_img)) {
+        try { $fh = (Get-FileHash $ev1_img -Algorithm SHA256).Hash.ToUpper(); Log-Detail "Event1 file=$fh IOC=$IOCvalue"; if ($fh -eq $IOCvalue) { $ev1_match = $true } else { Log-Detail "Event1: mismatch" } } catch { Log-Detail "Event1 hash error: $($_.Exception.Message)" }
+    } else { Log-Detail "Event1: image not on disk: $ev1_img" }
 
-    Log-Detail "Event 1: Malicious process detected - $imagePath (PID=$processId)"
+    Start-DFIRBackground -EventType "Event1" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -ProcessImage $ev1_img -ProcessId $ev1_pid -ParentImage $parentImage -AgentName $agentName
 
-    # Kill process ตาม PID ที่ได้จาก alert โดยตรง
-    if ($processId) {
-        try {
-            Stop-Process -Id $processId -Force
-            Log-Detail "Killed PID: $processId"
-        } catch {
-            Log-Detail "Kill PID failed: $($_.Exception.Message)"
-        }
-    }
-
-    # Kill process อื่นที่รัน executable เดียวกัน
-    if ($imagePath) {
-        try {
-            $procs = Get-CimInstance Win32_Process | Where-Object {
-                $_.ExecutablePath -eq $imagePath
-            }
-            foreach ($p in $procs) {
-                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-                Log-Detail "Killed matching process PID: $($p.ProcessId)"
-            }
-        } catch {
-            Log-Detail "Kill by path failed: $($_.Exception.Message)"
-        }
-    }
-
-    Start-Sleep -Seconds 1
-
-    # ลบ executable
-    if ($imagePath -and (Test-Path $imagePath)) {
-        try {
-            Remove-Item $imagePath -Force
-            Log-Detail "Deleted executable: $imagePath"
-        } catch {
-            Log-Detail "Delete failed: $($_.Exception.Message)"
-        }
+    if ($ev1_match) {
+        if ($ev1_pid) { try { Stop-Process -Id $ev1_pid -Force; Log-Detail "Killed PID: $ev1_pid" } catch { Log-Detail "Kill PID failed: $($_.Exception.Message)" } }
+        if ($ev1_img) { try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev1_img } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Log-Detail "Killed matching PID: $($_.ProcessId)" } } catch {} }
+        Start-Sleep -Seconds 1
+        if ($ev1_img -and (Test-Path $ev1_img)) { try { Remove-Item $ev1_img -Force; Log-Detail "Deleted: $ev1_img" } catch { Log-Detail "Delete failed: $($_.Exception.Message)" } }
     }
 }
 
-# =========================
-# 5c. DRIVER RESPONSE (Sysmon Event 6)
-# =========================
+# 5c. Event 6
 if ($IOCtype -eq "sha256" -and $eventID -eq "6") {
-    $driverPath = $alert.data.win.eventdata.imageLoaded
-
-    Log-Detail "Event 6: Malicious driver detected - $driverPath"
-
-    # ⚠️ ลบ driver ตรงๆ ไม่ได้เพราะ kernel lock อยู่
-    # ต้อง schedule ลบตอน reboot แทน
-    if ($driverPath -and (Test-Path $driverPath)) {
+    $ev6_drv = $alert.data.win.eventdata.imageLoaded
+    Log-Detail "Event 6: driver=$ev6_drv"
+    Start-DFIRBackground -EventType "Event6" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev6_drv -AgentName $agentName
+    if ($ev6_drv -and (Test-Path $ev6_drv)) {
         try {
-            # MoveFileEx API - ลบตอน reboot
-            $code = @"
-using System;
-using System.Runtime.InteropServices;
-public class FileHelper {
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool MoveFileEx(string lpExistingFileName,
-        string lpNewFileName, int dwFlags);
-    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
-}
-"@
-            Add-Type -TypeDefinition $code
-            $result = [FileHelper]::MoveFileEx($driverPath, $null,
-                [FileHelper]::MOVEFILE_DELAY_UNTIL_REBOOT)
-
-            if ($result) {
-                Log-Detail "Scheduled driver delete on reboot: $driverPath"
-            } else {
-                Log-Detail "MoveFileEx failed"
-            }
-        } catch {
-            Log-Detail "Driver delete error: $($_.Exception.Message)"
-        }
-    }
-
-    # Disable driver service ถ้ามี
-    try {
-        $driverName = [System.IO.Path]::GetFileNameWithoutExtension($driverPath)
-        $svc = Get-Service -Name $driverName -ErrorAction SilentlyContinue
-        if ($svc) {
-            Stop-Service -Name $driverName -Force -ErrorAction SilentlyContinue
-            Set-Service -Name $driverName -StartupType Disabled
-            Log-Detail "Disabled driver service: $driverName"
-        }
-    } catch {
-        Log-Detail "Service disable error: $($_.Exception.Message)"
+            $fh = (Get-FileHash $ev6_drv -Algorithm SHA256).Hash.ToUpper()
+            Log-Detail "Event6 file=$fh IOC=$IOCvalue"
+            if ($fh -eq $IOCvalue) {
+                try {
+                    Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FHDrv { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -ErrorAction SilentlyContinue
+                    if ([FHDrv]::MoveFileEx($ev6_drv,$null,[FHDrv]::D)) { Log-Detail "Scheduled driver delete on reboot: $ev6_drv" } else { Log-Detail "MoveFileEx failed (Event6)" }
+                } catch { Log-Detail "Driver delete error: $($_.Exception.Message)" }
+                try { $n=[System.IO.Path]::GetFileNameWithoutExtension($ev6_drv); $s=Get-Service -Name $n -EA SilentlyContinue; if($s){Stop-Service $n -Force -EA SilentlyContinue;Set-Service $n -StartupType Disabled;Log-Detail "Disabled service: $n"} } catch {}
+            } else { Log-Detail "Event6: mismatch" }
+        } catch { Log-Detail "Event6 error: $($_.Exception.Message)" }
     }
 }
 
-# =========================
-# 5d. DLL RESPONSE (Sysmon Event 7)
-# =========================
+# 5d. Event 7
 if ($IOCtype -eq "sha256" -and $eventID -eq "7") {
-    $dllPath   = $alert.data.win.eventdata.imageLoaded
-    $procImage = $alert.data.win.eventdata.image
-
-    Log-Detail "Event 7: Malicious DLL detected - $dllPath"
-    Log-Detail "Loaded by process: $procImage"
-
-    # Kill process ที่โหลด DLL นี้อยู่ก่อน
-    try {
-        $procs = Get-CimInstance Win32_Process | Where-Object {
-            $_.ExecutablePath -eq $procImage
-        }
-        foreach ($p in $procs) {
-            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-            Log-Detail "Killed process PID: $($p.ProcessId) ($($p.Name))"
-        }
-    } catch {
-        Log-Detail "Kill process failed: $($_.Exception.Message)"
-    }
-
-    Start-Sleep -Seconds 2
-
-    # ลบ DLL
-    if ($dllPath -and (Test-Path $dllPath)) {
-        try {
-            Remove-Item $dllPath -Force
-            Log-Detail "Deleted DLL: $dllPath"
-        } catch {
-            # DLL อาจยัง lock อยู่ - schedule ลบตอน reboot
-            try {
-                $code = @"
-using System;
-using System.Runtime.InteropServices;
-public class FileHelper2 {
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool MoveFileEx(string lpExistingFileName,
-        string lpNewFileName, int dwFlags);
-    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
-}
-"@
-                Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-                $result = [FileHelper2]::MoveFileEx($dllPath, $null,
-                    [FileHelper2]::MOVEFILE_DELAY_UNTIL_REBOOT)
-                if ($result) {
-                    Log-Detail "Scheduled DLL delete on reboot: $dllPath"
-                }
-            } catch {
-                Log-Detail "Schedule delete failed: $($_.Exception.Message)"
+    $ev7_dll  = $alert.data.win.eventdata.imageLoaded
+    $ev7_proc = $alert.data.win.eventdata.image
+    Log-Detail "Event 7: dll=$ev7_dll loadedBy=$ev7_proc"
+    $ev7_match = $false
+    if ($ev7_dll -and (Test-Path $ev7_dll)) {
+        try { $fh=(Get-FileHash $ev7_dll -Algorithm SHA256).Hash.ToUpper(); Log-Detail "Event7 file=$fh IOC=$IOCvalue"; if($fh -eq $IOCvalue){$ev7_match=$true}else{Log-Detail "Event7: mismatch"} } catch { Log-Detail "Event7 hash error: $($_.Exception.Message)" }
+    } else { Log-Detail "Event7: DLL not found: $ev7_dll" }
+    Start-DFIRBackground -EventType "Event7" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev7_dll -ProcessImage $ev7_proc -AgentName $agentName
+    if ($ev7_match) {
+        try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev7_proc } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Killed PID: $($_.ProcessId)" } } catch { Log-Detail "Kill process failed: $($_.Exception.Message)" }
+        Start-Sleep -Seconds 2
+        if ($ev7_dll -and (Test-Path $ev7_dll)) {
+            try { Remove-Item $ev7_dll -Force; Log-Detail "Deleted DLL: $ev7_dll" }
+            catch {
+                try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FHDll { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FHDll]::MoveFileEx($ev7_dll,$null,[FHDll]::D)){Log-Detail "Scheduled DLL delete on reboot: $ev7_dll"}else{Log-Detail "MoveFileEx failed (Event7)"} } catch { Log-Detail "Schedule failed (Event7): $($_.Exception.Message)" }
             }
         }
     }
 }
 
-
-# =========================
-# 5. FILE RESPONSE (Sysmon Event 15)
-# =========================
-
+# 5e. Event 15
 if ($IOCtype -eq "sha256" -and $eventID -eq "15") {
-
-    $targetFile = $alert.data.win.eventdata.targetFilename
-    Log-Detail "Sysmon targetFilename: $targetFile"
-    if (Test-Path $targetFile) {
+    $ev15_tgt = $alert.data.win.eventdata.targetFilename
+    $ev15_src = $alert.data.win.eventdata.image
+    Log-Detail "Event 15: targetFile=$ev15_tgt writtenBy=$ev15_src"
+    if ($ev15_tgt -and (Test-Path $ev15_tgt)) {
         try {
-            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
-            Log-Detail "File hash: $fileHash"
-            Log-Detail "IOC hash:  $IOCvalue"
-
-            if ($fileHash -eq $IOCvalue) {
-                Log-Detail "HASH MATCH → kill processes then delete"
-
-                # Kill process ที่เปิดไฟล์นี้อยู่ผ่าน handle
-                try {
-                    $processes = Get-CimInstance Win32_Process | Where-Object {
-                        $_.CommandLine -like "*$targetFile*"
-                    }
-                    foreach ($proc in $processes) {
-                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-                        Log-Detail "Killed PID: $($proc.ProcessId) ($($proc.Name))"
-                    }
-                } catch {
-                    Log-Detail "Kill by CommandLine failed: $($_.Exception.Message)"
-                }
-
-                # ใช้ handle64.exe ถ้ามี (Sysinternals) เพื่อ release file lock
+            $fh = (Get-FileHash $ev15_tgt -Algorithm SHA256).Hash.ToUpper()
+            Log-Detail "Event15 file=$fh IOC=$IOCvalue"
+            if ($fh -eq $IOCvalue) {
+                Log-Detail "Event 15: HASH MATCH -> kill + delete"
+                Start-DFIRBackground -EventType "Event15" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev15_tgt -ProcessImage $ev15_src -AgentName $agentName
+                try { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$ev15_tgt*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event15: Killed PID $($_.ProcessId)" } } catch { Log-Detail "Event15: Kill failed: $($_.Exception.Message)" }
                 $handleExe = "C:\Tools\handle64.exe"
-                if (Test-Path $handleExe) {
-                    try {
-                        $handleOutput = & $handleExe -accepteula -nobanner "$targetFile" 2>&1
-                        foreach ($line in $handleOutput) {
-                            if ($line -match "pid: (\d+)") {
-                                $pidProcess = $matches[1]
-                                Stop-Process -Id $pidProcess -Force -ErrorAction SilentlyContinue
-                                Log-Detail "Killed handle PID: $pidProcess"
-                            }
-                        }
-                    } catch {
-                        Log-Detail "handle64 failed: $($_.Exception.Message)"
-                    }
-                }
-
-                # รอให้ process ปิดก่อนลบ
+                if (Test-Path $handleExe) { try { & $handleExe -accepteula -nobanner "$ev15_tgt" 2>&1 | ForEach-Object { if ($_ -match "pid: (\d+)") { Stop-Process -Id $matches[1] -Force -EA SilentlyContinue; Log-Detail "Event15: Killed handle PID $($matches[1])" } } } catch { Log-Detail "handle64 failed: $($_.Exception.Message)" } }
                 Start-Sleep -Seconds 2
-
-                # ลบไฟล์
-                try {
-                    Remove-Item $targetFile -Force
-                    Log-Detail "Deleted: $targetFile"
-                } catch {
-                    # ถ้าลบไม่ได้ ให้ schedule ลบตอน reboot
-                    try {
-                        $null = Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$targetFile`"" -WindowStyle Hidden
-                        Log-Detail "Scheduled delete via cmd: $targetFile"
-                    } catch {
-                        Log-Detail "Delete failed: $($_.Exception.Message)"
-                    }
+                try { Remove-Item $ev15_tgt -Force; Log-Detail "Event15: Deleted: $ev15_tgt" }
+                catch {
+                    $del = $false
+                    try { Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$ev15_tgt`"" -WindowStyle Hidden -Wait; if(-not(Test-Path $ev15_tgt)){$del=$true;Log-Detail "Event15: Deleted via cmd"} } catch {}
+                    if (-not $del) { try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FH15 { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FH15]::MoveFileEx($ev15_tgt,$null,[FH15]::D)){Log-Detail "Event15: Scheduled delete on reboot"}else{Log-Detail "Event15: MoveFileEx failed"} } catch { Log-Detail "Event15: All delete failed: $($_.Exception.Message)" } }
                 }
-
-            } else {
-                Log-Detail "Hash mismatch - no action"
-            }
-        } catch {
-            Log-Detail "Error: $($_.Exception.Message)"
-        }
-    } else {
-        Log-Detail "targetFile not found: $targetFile"
-    }
+            } else { Log-Detail "Event15: mismatch (file=$fh IOC=$IOCvalue)" }
+        } catch { Log-Detail "Event15 error: $($_.Exception.Message)" }
+    } else { Log-Detail "Event15: targetFile not found: $ev15_tgt" }
 }
 
-# =========================
-# 5e. FILE RESPONSE (Sysmon Event 29 - File Executable Detected)
-# =========================
-# Event 29: Sysmon ตรวจเจอไฟล์ executable ถูกเขียนลง disk
-# ใช้ targetFilename + hashes เหมือน Event 15
-# ไฟล์ยังอยู่บน disk → verify hash แล้วลบทิ้ง
-
-if ($IOCtype -eq "sha256" -and $eventID -eq "29") {
-
-    $targetFile = $alert.data.win.eventdata.targetFilename
-    Log-Detail "Event 29 (File Executable Detected): $targetFile"
-
-    if ($targetFile -and (Test-Path $targetFile)) {
-        try {
-            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
-            Log-Detail "File hash: $fileHash"
-            Log-Detail "IOC hash:  $IOCvalue"
-
-            if ($fileHash -eq $IOCvalue) {
-                Log-Detail "HASH MATCH (Event 29) → kill parent process then delete"
-
-                # Kill process ที่เขียนไฟล์นี้ (image = parent process)
-                $parentImage = $alert.data.win.eventdata.image
-                if ($parentImage) {
-                    try {
-                        $procs = Get-CimInstance Win32_Process | Where-Object {
-                            $_.ExecutablePath -eq $parentImage
-                        }
-                        foreach ($p in $procs) {
-                            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-                            Log-Detail "Killed parent process PID: $($p.ProcessId) ($parentImage)"
-                        }
-                    } catch {
-                        Log-Detail "Kill parent process failed: $($_.Exception.Message)"
-                    }
-                }
-
-                # Kill process ใดๆ ที่รันไฟล์นี้อยู่แล้ว
-                try {
-                    $procs2 = Get-CimInstance Win32_Process | Where-Object {
-                        $_.ExecutablePath -eq $targetFile
-                    }
-                    foreach ($p in $procs2) {
-                        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-                        Log-Detail "Killed running target PID: $($p.ProcessId)"
-                    }
-                } catch {
-                    Log-Detail "Kill target process failed: $($_.Exception.Message)"
-                }
-
-                Start-Sleep -Seconds 2
-
-                # ลบไฟล์
-                try {
-                    Remove-Item $targetFile -Force
-                    Log-Detail "Deleted (Event 29): $targetFile"
-                } catch {
-                    # ถ้าลบไม่ได้ทันที ให้ schedule ลบตอน reboot
-                    try {
-                        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class FileHelper29 {
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool MoveFileEx(string lpExistingFileName,
-        string lpNewFileName, int dwFlags);
-    public const int MOVEFILE_DELAY_UNTIL_REBOOT = 4;
-}
-"@ -ErrorAction SilentlyContinue
-                        $result = [FileHelper29]::MoveFileEx($targetFile, $null,
-                            [FileHelper29]::MOVEFILE_DELAY_UNTIL_REBOOT)
-                        if ($result) {
-                            Log-Detail "Scheduled delete on reboot (Event 29): $targetFile"
-                        } else {
-                            Log-Detail "MoveFileEx failed (Event 29)"
-                        }
-                    } catch {
-                        Log-Detail "Schedule delete failed (Event 29): $($_.Exception.Message)"
-                    }
-                }
-
-            } else {
-                Log-Detail "Hash mismatch (Event 29) - no action"
-            }
-        } catch {
-            Log-Detail "Event 29 handling error: $($_.Exception.Message)"
-        }
-    } else {
-        Log-Detail "targetFile not found (Event 29): $targetFile"
-    }
-}
-
-# =========================
-# 5f. FILE RESPONSE (Sysmon Event 26 - File Delete Detected)
-# =========================
-# Event 26: Sysmon บันทึกว่าไฟล์ถูกลบไปแล้ว (อาจถูก archive ไว้ใน Sysmon archive dir)
-# ไฟล์ต้นทางหายแล้ว → ตรวจสอบ Sysmon archive แล้วลบทิ้ง + log ไว้เป็นหลักฐาน
-
+# 5f. Event 26
 if ($IOCtype -eq "sha256" -and $eventID -eq "26") {
-
-    $targetFile = $alert.data.win.eventdata.targetFilename
-    Log-Detail "Event 26 (File Delete Detected): $targetFile"
-
-    # ตรวจว่าไฟล์ต้นทางยังหลงเหลืออยู่หรือไม่ (บางกรณี Sysmon log ช้า)
-    if ($targetFile -and (Test-Path $targetFile)) {
+    $ev26_tgt = $alert.data.win.eventdata.targetFilename
+    $ev26_img = $alert.data.win.eventdata.image
+    Log-Detail "Event 26 (File Delete Detected): $ev26_tgt"
+    Start-DFIRBackground -EventType "Event26" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev26_tgt -ProcessImage $ev26_img -AgentName $agentName
+    if ($ev26_tgt -and (Test-Path $ev26_tgt)) {
         try {
-            $fileHash = (Get-FileHash $targetFile -Algorithm SHA256).Hash
-            Log-Detail "File hash (still present): $fileHash"
-            Log-Detail "IOC hash: $IOCvalue"
-
-            if ($fileHash -eq $IOCvalue) {
-                Log-Detail "HASH MATCH (Event 26) - original file still exists → delete"
-                try {
-                    Remove-Item $targetFile -Force
-                    Log-Detail "Deleted original file (Event 26): $targetFile"
-                } catch {
-                    Log-Detail "Delete failed (Event 26): $($_.Exception.Message)"
-                }
-            } else {
-                Log-Detail "Hash mismatch (Event 26) - no action on original"
-            }
-        } catch {
-            Log-Detail "Event 26 hash check error: $($_.Exception.Message)"
-        }
-    } else {
-        Log-Detail "Original file already gone (Event 26) - checking Sysmon archive"
+            $fh = (Get-FileHash $ev26_tgt -Algorithm SHA256).Hash.ToUpper()
+            Log-Detail "Event26 file=$fh IOC=$IOCvalue"
+            if ($fh -eq $IOCvalue) { try { Remove-Item $ev26_tgt -Force; Log-Detail "Event26: Deleted original: $ev26_tgt" } catch { Log-Detail "Event26: Delete failed: $($_.Exception.Message)" } }
+            else { Log-Detail "Event26: mismatch" }
+        } catch { Log-Detail "Event26 hash error: $($_.Exception.Message)" }
+    } else { Log-Detail "Event26: Original gone - checking Sysmon archive" }
+    foreach ($ad in @("C:\Sysmon","C:\Windows\Sysmon","C:\ProgramData\Sysmon")) {
+        if (Test-Path $ad) { $af = Join-Path $ad $IOCvalue; if (Test-Path $af) { try { Remove-Item $af -Force; Log-Detail "Event26: Deleted archive: $af" } catch { Log-Detail "Event26: Delete archive failed: $($_.Exception.Message)" } } else { Log-Detail "Event26: No archive at: $af" } }
     }
-
-    # ตรวจ Sysmon archive directory (default: C:\Sysmon\)
-    # Sysmon จะ archive ไฟล์ที่ถูกลบในชื่อ SHA256 hash ของไฟล์นั้น
-    $sysmonArchiveDirs = @(
-        "C:\Sysmon",
-        "C:\Windows\Sysmon",
-        "C:\ProgramData\Sysmon"
-    )
-
-    foreach ($archiveDir in $sysmonArchiveDirs) {
-        if (Test-Path $archiveDir) {
-            $archivedFile = Join-Path $archiveDir $IOCvalue
-            if (Test-Path $archivedFile) {
-                try {
-                    Remove-Item $archivedFile -Force
-                    Log-Detail "Deleted Sysmon archive copy (Event 26): $archivedFile"
-                } catch {
-                    Log-Detail "Delete archive failed (Event 26): $($_.Exception.Message)"
-                }
-            } else {
-                Log-Detail "No archive copy found at: $archivedFile"
-            }
-        }
-    }
-
-    # Kill process ที่อาจเป็นต้นเหตุการลบไฟล์ (image = process ที่สั่ง delete)
-    $parentImage = $alert.data.win.eventdata.image
-    if ($parentImage) {
-        Log-Detail "Event 26 triggered by process: $parentImage"
-        # ไม่ kill โดยอัตโนมัติ เพราะ process อาจเป็น legitimate tool
-        # แต่ log ไว้เพื่อ investigation
-        Log-Detail "NOTE: Review process '$parentImage' manually if suspicious"
-    }
+    if ($ev26_img) { Log-Detail "Event26: triggered by: $ev26_img"; Log-Detail "NOTE: Review '$ev26_img' manually if suspicious" }
 }
 
-# =========================
-# 6. FILE RESPONSE (FIM)
-# =========================
-if ($IOCtype -eq "sha256" -and $filePath) {
+# 5g. Event 29
+if ($IOCtype -eq "sha256" -and $eventID -eq "29") {
+    $ev29_tgt = $alert.data.win.eventdata.targetFilename
+    $ev29_img = $alert.data.win.eventdata.image
+    Log-Detail "Event 29 (File Executable Detected): $ev29_tgt"
+    if ($ev29_tgt -and (Test-Path $ev29_tgt)) {
+        try {
+            $fh = (Get-FileHash $ev29_tgt -Algorithm SHA256).Hash.ToUpper()
+            Log-Detail "Event29 file=$fh IOC=$IOCvalue"
+            if ($fh -eq $IOCvalue) {
+                Log-Detail "Event 29: HASH MATCH -> kill + delete"
+                Start-DFIRBackground -EventType "Event29" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev29_tgt -ProcessImage $ev29_img -AgentName $agentName
+                if ($ev29_img) { try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev29_img } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event29: Killed parent PID $($_.ProcessId)" } } catch { Log-Detail "Event29: Kill parent failed: $($_.Exception.Message)" } }
+                try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev29_tgt } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event29: Killed target PID $($_.ProcessId)" } } catch { Log-Detail "Event29: Kill target failed: $($_.Exception.Message)" }
+                Start-Sleep -Seconds 2
+                try { Remove-Item $ev29_tgt -Force; Log-Detail "Event29: Deleted: $ev29_tgt" }
+                catch { try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FH29 { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FH29]::MoveFileEx($ev29_tgt,$null,[FH29]::D)){Log-Detail "Event29: Scheduled delete on reboot"}else{Log-Detail "Event29: MoveFileEx failed"} } catch { Log-Detail "Event29: Schedule failed: $($_.Exception.Message)" } }
+            } else { Log-Detail "Event29: mismatch (file=$fh IOC=$IOCvalue)" }
+        } catch { Log-Detail "Event29 error: $($_.Exception.Message)" }
+    } else { Log-Detail "Event29: targetFile not found: $ev29_tgt" }
+}
 
+# 6. FIM
+if ($IOCtype -eq "sha256" -and $filePath) {
     if (Test-Path $filePath) {
         try {
-            $fileHash = (Get-FileHash $filePath -Algorithm SHA256).Hash
-
-            if ($fileHash -eq $IOCvalue) {
-                Log-Detail "FIM HASH MATCH → kill processes then delete"
-
-                # Kill by ExecutablePath ตรงๆ
-                try {
-                    $processes = Get-CimInstance Win32_Process | Where-Object {
-                        $_.ExecutablePath -eq $filePath
-                    }
-                    foreach ($proc in $processes) {
-                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-                        Log-Detail "Killed PID (ExecutablePath): $($proc.ProcessId)"
-                    }
-                } catch {
-                    Log-Detail "Kill by ExecutablePath failed: $($_.Exception.Message)"
-                }
-
-                # Kill by CommandLine
-                try {
-                    $processes2 = Get-CimInstance Win32_Process | Where-Object {
-                        $_.CommandLine -like "*$filePath*"
-                    }
-                    foreach ($proc in $processes2) {
-                        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-                        Log-Detail "Killed PID (CommandLine): $($proc.ProcessId)"
-                    }
-                } catch {
-                    Log-Detail "Kill by CommandLine failed: $($_.Exception.Message)"
-                }
-
-                # รอให้ process ปิด
+            $fh = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToUpper()
+            if ($fh -eq $IOCvalue) {
+                Log-Detail "FIM HASH MATCH -> kill + delete"
+                Start-DFIRBackground -EventType "FIM" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $filePath -AgentName $agentName
+                try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $filePath } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "FIM: Killed PID (ExecutablePath): $($_.ProcessId)" } } catch { Log-Detail "FIM: Kill by ExecutablePath failed: $($_.Exception.Message)" }
+                try { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$filePath*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "FIM: Killed PID (CommandLine): $($_.ProcessId)" } } catch { Log-Detail "FIM: Kill by CommandLine failed: $($_.Exception.Message)" }
                 Start-Sleep -Seconds 2
-
-                # ลบไฟล์
-                try {
-                    Remove-Item $filePath -Force
-                    Log-Detail "Deleted: $filePath"
-                } catch {
-                    try {
-                        $null = Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$filePath`"" -WindowStyle Hidden
-                        Log-Detail "Scheduled delete via cmd: $filePath"
-                    } catch {
-                        Log-Detail "Delete failed: $($_.Exception.Message)"
-                    }
-                }
-
-            } else {
-                Log-Detail "FIM hash mismatch"
-            }
-        } catch {
-            Log-Detail "FIM handling error: $($_.Exception.Message)"
-        }
-    } else {
-        Log-Detail "File not found (FIM): $filePath"
-    }
+                try { Remove-Item $filePath -Force; Log-Detail "FIM: Deleted: $filePath" }
+                catch { try { Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$filePath`"" -WindowStyle Hidden; Log-Detail "FIM: Scheduled delete via cmd: $filePath" } catch { Log-Detail "FIM: Delete failed: $($_.Exception.Message)" } }
+            } else { Log-Detail "FIM: mismatch (file=$fh IOC=$IOCvalue)" }
+        } catch { Log-Detail "FIM error: $($_.Exception.Message)" }
+    } else { Log-Detail "FIM: File not found: $filePath" }
 }
 
-# =========================
-# 7. NETWORK BLOCK (Sysmon Event 3)
-# =========================
+# 7. Network Block (Event 3)
 $winSystem    = $alert.data.win.system
 $winEventdata = $alert.data.win.eventdata
 
 if ($winSystem.eventID -eq '3') {
-
     $ip = $winEventdata.destinationIp
-
     if ($ip) {
+        Start-DFIRBackground -EventType "Event3" -IOCValue $ip -IOCType "ip" -AlertJson $inputJson -ProcessImage $winEventdata.image -DestinationIp $ip -AgentName $agentName
         $ruleName = "Wazuh AR Block $ip"
-
-        if ($command -eq "add") {
-            New-NetFirewallRule -DisplayName $ruleName `
-                -Direction Outbound -Action Block `
-                -RemoteAddress $ip -Protocol Any
-            Log-Detail "Blocked IP: $ip"
-        } elseif ($command -eq "delete") {
-            Remove-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
-            Log-Detail "Unblocked IP: $ip"
-        }
+        if ($command -eq "add") { New-NetFirewallRule -DisplayName $ruleName -Direction Outbound -Action Block -RemoteAddress $ip -Protocol Any; Log-Detail "Blocked IP: $ip" }
+        elseif ($command -eq "delete") { Remove-NetFirewallRule -DisplayName $ruleName -EA SilentlyContinue; Log-Detail "Unblocked IP: $ip" }
     }
 }
 
-# =========================
-# 8. DOMAIN BLOCK (Sysmon Event 22)
-# =========================
+# 8. Domain Block (Event 22)
 if ($winSystem.eventID -eq '22') {
-
-    $domain = $winEventdata.queryName
+    $domain    = $winEventdata.queryName
     $hostsPath = "C:\Windows\System32\drivers\etc\hosts"
-
-    if ($domain -and -not (Select-String $hostsPath $domain -Quiet)) {
-        Add-Content $hostsPath "127.0.0.1`t$domain"
-        Log-Detail "Blocked domain: $domain"
+    if ($domain) {
+        Start-DFIRBackground -EventType "Event22" -IOCValue $domain -IOCType "domain" -AlertJson $inputJson -ProcessImage $winEventdata.image -Domain $domain -AgentName $agentName
+        if (-not (Select-String $hostsPath $domain -Quiet)) { Add-Content $hostsPath "127.0.0.1`t$domain"; Log-Detail "Blocked domain: $domain" }
     }
 }
 
-# =========================
-# END
-# =========================
 Log-Detail "=== AR SCRIPT ENDED ==="
 exit 0

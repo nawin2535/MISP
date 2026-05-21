@@ -1350,20 +1350,18 @@ ______     -->
              ============================================================ -->
 
         <!-- Google Chrome unpacking extensions -->
+        <!-- FIX 19may2569: collapsed multi-line condition values to single line; whitespace bug prevented match -->
         <Rule groupRelation="and">
           <Image condition="end with">\Google\Chrome\Application\chrome.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\chrome_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\chrome_chrome_Unpacker_BeginUnzipping</TargetFilename>
         </Rule>
         <Rule groupRelation="and">
           <Image condition="end with">\Google\Chrome\Application\chrome.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\chromecrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\chromecrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
         </Rule>
         <Rule groupRelation="and">
           <Image condition="end with">\Google\Chrome\Application\chrome.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\chromiumcrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\chromiumcrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
         </Rule>
         <Rule groupRelation="and">
           <Image condition="end with">\Google\Chrome\Application\chrome.exe</Image>
@@ -1372,13 +1370,11 @@ ______     -->
         <!-- Microsoft Edge unpacking extensions -->
         <Rule groupRelation="and">
           <Image condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\msedge_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\msedge_chrome_Unpacker_BeginUnzipping</TargetFilename>
         </Rule>
         <Rule groupRelation="and">
           <Image condition="is">C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\msedgecrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\msedgecrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
         </Rule>
 
         <!-- ============================================================
@@ -1539,16 +1535,15 @@ ______     -->
           <Image condition="end with">\OmenCommandCenterBackground.exe</Image>
         </Rule>
         <!-- Google Updater self-update extracting installer -->
+        <!-- FIX 19may2569: collapsed multi-line condition values to single line -->
         <Rule groupRelation="and">
           <Image condition="contains">\AppData\Local\Google\GoogleUpdater\</Image>
           <Image condition="end with">\updater.exe</Image>
-          <TargetFilename condition="contains">
-            \AppData\Local\Temp\GoogleUpdater_chrome_Unpacker_BeginUnzipping</TargetFilename>
+          <TargetFilename condition="contains">\AppData\Local\Temp\GoogleUpdater_chrome_Unpacker_BeginUnzipping</TargetFilename>
           <TargetFilename condition="end with">_chrome_installer_uncompressed.exe</TargetFilename>
         </Rule>
         <Rule groupRelation="and">
-          <Image condition="contains">
-            \AppData\Local\Temp\GoogleUpdater_chrome_Unpacker_BeginUnzipping</Image>
+          <Image condition="contains">\AppData\Local\Temp\GoogleUpdater_chrome_Unpacker_BeginUnzipping</Image>
           <Image condition="end with">\UpdaterSetup.exe</Image>
           <TargetFilename condition="contains">\AppData\Local\Temp\Google</TargetFilename>
           <TargetFilename condition="contains">\bin\</TargetFilename>

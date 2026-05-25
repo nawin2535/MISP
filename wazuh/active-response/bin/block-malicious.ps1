@@ -94,6 +94,25 @@ try {
 $command = $INPUT_ARRAY.command
 $alert   = $INPUT_ARRAY.parameters.alert
 
+# GUARD 25may2569: prevent AR loop — early exit if alert points at a file
+# already inside our own dfir-found collection folder. Sysmon Event 11/29
+# fires on every DFIR copy (same hash); without this guard the AR re-triggers
+# Invoke-DFIRCollection.ps1, which copies the file again with _DFIR_COPY suffix,
+# infinitely.
+$dfirRootGuard = "C:\install-sysmon\dfir-found"
+$guardCandidates = @(
+    $alert.data.win.eventdata.targetFilename,
+    $alert.data.win.eventdata.image,
+    $alert.data.win.eventdata.imageLoaded,
+    $alert.syscheck.path
+) | Where-Object { $_ }
+foreach ($_gp in $guardCandidates) {
+    if ($_gp.ToLower().StartsWith($dfirRootGuard.ToLower())) {
+        Log-Detail "EARLY EXIT: alert targets file inside dfir-found ($_gp) - skipping to prevent AR loop"
+        exit 0
+    }
+}
+
 # 3. Extract IOC
 $IOCvalue = $null; $IOCtype = $null; $IOCmode = $null
 $eventID    = $alert.data.win.system.eventID

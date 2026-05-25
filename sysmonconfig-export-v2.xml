@@ -1269,6 +1269,10 @@ ______     -->
     <!-- Event ID 11 == FileCreate - Excludes -->
     <RuleGroup groupRelation="or">
       <FileCreate onmatch="exclude">
+        <!-- 25may2569: prevent AR loop — exclude all files created inside our own DFIR collection folder.
+             block-malicious.ps1 -> Invoke-DFIRCollection.ps1 copies suspect files with _DFIR_COPY suffix.
+             Without this exclude, the copy itself triggers Sysmon Event 11/29 -> AR fires again -> infinite loop. -->
+        <TargetFilename condition="begin with">C:\install-sysmon\dfir-found\</TargetFilename>
         <Image condition="is">C:\Program Files (x86)\Dell\CommandUpdate\InvColPC.exe</Image>
         <Rule groupRelation="and">
           <Image condition="is">C:\Program Files\Elastic\Endpoint\elastic-endpoint.exe</Image>

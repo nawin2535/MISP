@@ -92,6 +92,19 @@ $sysBinaryPaths = @(
 )
 
 foreach ($fp in @($TargetFile, $ProcessImage) | Where-Object { $_ -and (Test-Path $_) }) {
+    # GUARD 25may2569: prevent infinite loop — never copy a file that is already
+    # inside dfir-found (would create <name>_DFIR_COPY_DFIR_COPY... and re-trigger
+    # Sysmon Event 11/29 on the copy)
+    if ($fp.ToLower().StartsWith($dfirRoot.ToLower())) {
+        Log-Detail "Skipped (already in dfir-found, prevents AR loop): $fp"
+        continue
+    }
+    # GUARD 25may2569: defensive — also skip if filename already has _DFIR_COPY
+    # (residue from earlier looped runs before this guard was deployed)
+    if ([System.IO.Path]::GetFileName($fp) -match '_DFIR_COPY') {
+        Log-Detail "Skipped (filename contains _DFIR_COPY residue): $fp"
+        continue
+    }
     try {
         $isSystemBinary = $sysBinaryPaths | Where-Object { $fp.ToLower().StartsWith($_.ToLower()) }
 

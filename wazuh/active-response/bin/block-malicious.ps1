@@ -113,6 +113,32 @@ foreach ($_gp in $guardCandidates) {
     }
 }
 
+# GUARD 25may2569 (Fix 4): refuse all destructive AR actions when alert
+# targets a file inside a Windows system binary path. The MISP feed has
+# been observed to ship hashes of standard Windows binaries (gcapi.dll on
+# 19 may, SysWOW64\rundll32.exe on 25 may). If those hashes match, AR
+# would attempt to kill + delete system binaries -> permanent Windows
+# corruption (especially via MoveFileEx delete-on-reboot fallback).
+# We are 100% downstream of the MISP feed (cannot fix upstream), so this
+# safeguard is the last defense.
+$protectedSystemPaths = @(
+    "C:\Windows\System32\",
+    "C:\Windows\SysWOW64\",
+    "C:\Windows\WinSxS\",
+    "C:\Windows\assembly\",
+    "C:\Windows\Microsoft.NET\",
+    "C:\Program Files\Windows Defender\",
+    "C:\Program Files (x86)\ossec-agent\"
+)
+foreach ($_gp in $guardCandidates) {
+    foreach ($_pp in $protectedSystemPaths) {
+        if ($_gp.ToLower().StartsWith($_pp.ToLower())) {
+            Log-Detail "EARLY EXIT (protected system path): $_gp - MISP feed likely contaminated with Windows system binary hash, refusing kill/delete"
+            exit 0
+        }
+    }
+}
+
 # 3. Extract IOC
 $IOCvalue = $null; $IOCtype = $null; $IOCmode = $null
 $eventID    = $alert.data.win.system.eventID

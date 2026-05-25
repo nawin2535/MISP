@@ -1,3 +1,268 @@
+misp-ioc-match
+APP
+ — 9:24
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673101.60916977
+Time: 2026-05-25T08:38:21.389+0700
+misp-ioc-match
+APP
+ — 9:24
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673099.60830342
+Time: 2026-05-25T08:38:19.599+0700
+misp-ioc-match
+APP
+ — 9:24
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673099.60812687
+Time: 2026-05-25T08:38:19.336+0700
+misp-ioc-match
+APP
+ — 9:24
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673099.60801342
+Time: 2026-05-25T08:38:19.216+0700
+misp-ioc-match
+APP
+ — 9:22
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673048.59223946
+Time: 2026-05-25T08:37:28.025+0700
+misp-ioc-match
+APP
+ — 9:22
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673047.59212632
+Time: 2026-05-25T08:37:27.900+0700
+misp-ioc-match
+APP
+ — 9:22
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673047.59201338
+Time: 2026-05-25T08:37:27.713+0700
+misp-ioc-match
+APP
+ — 9:22
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673046.59156032
+Time: 2026-05-25T08:37:26.885+0700
+misp-ioc-match
+APP
+ — 9:22
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673046.59142821
+Time: 2026-05-25T08:37:26.746+0700
+misp-ioc-match
+APP
+ — 9:21
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673034.58784750
+Time: 2026-05-25T08:37:14.023+0700
+misp-ioc-match
+APP
+ — 9:20
+@here
+🚨 Wazuh Alert - MISP IoC Match (Rule 110031)
+⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 1
+Agent
+(053) - PToey-laptop-acer
+Location
+EventChannel
+Rule ID
+110031 (Level 12)
+Event ID
+1
+AR Action
+🔴 Kill Process + Delete Executable
+SHA256 IoC
+8DCAEEEBEF9B9F3D41D295DB145FFB3850F309D089C08125C7FA7034DB5FD80E
+Image / Executable
+C:\\Windows\\SysWOW64\\rundll32.exe
+Rule Description
+Sysmon ID 1: SHA256 IoC matched MISP - C:\\Windows\\SysWOW64\\rundll32.exe
+ID: 1779673000.56350656
+Time: 2026-05-25T08:36:40.513+0700
+_________________________
 @here
 🚨 Wazuh Alert - MISP IoC Match (Rule 110036)
 ⚠️ MISP Threat Intelligence Match - Sysmon/FIM Event 29

@@ -37,6 +37,13 @@ ______     -->
     <!-- Event ID 1 == Process Creation - Excludes -->
     <RuleGroup groupRelation="or">
       <ProcessCreate onmatch="exclude">
+        <!-- 27may2569: LINE messenger updater opens file location after self-update.
+             Parent=LINE.exe (per-user AppData install) -> Child=explorer.exe (immutable system path).
+             Observed 16 events across 7 agents on 2026-05-27. Child is system explorer.exe so spawning it gains attacker nothing. -->
+        <Rule groupRelation="and">
+          <ParentImage condition="contains">\AppData\Local\LINE\bin\current\LINE.exe</ParentImage>
+          <Image condition="is">C:\Windows\explorer.exe</Image>
+        </Rule>
         <Rule groupRelation="and">
           <Image condition="end with">AcroRd32.exe</Image>
           <CommandLine condition="contains any">/CR;channel=</CommandLine>
@@ -1152,6 +1159,14 @@ ______     -->
     <!-- Event ID 10 == ProcessAccess - Excludes -->
     <RuleGroup groupRelation="or">
       <ProcessAccess onmatch="exclude">
+        <!-- 27may2569: Microsoft PC Manager (MS Store app) enumerates mstsc.exe during cleanup/maintenance scan.
+             Source path under \WindowsApps\ is admin-write only. Target=immutable system32 mstsc.exe.
+             Observed 106 events/day on SAKARIN_IBM 2026-05-27 from rule 92920. -->
+        <Rule groupRelation="and">
+          <SourceImage condition="contains">\WindowsApps\Microsoft.MicrosoftPCManager_</SourceImage>
+          <SourceImage condition="end with">\PCManager\MSPCManagerCore.exe</SourceImage>
+          <TargetImage condition="is">C:\Windows\system32\mstsc.exe</TargetImage>
+        </Rule>
         <SourceImage condition="is">C:\Program Files\Adobe\Adobe Creative Cloud
           Experience\libs\node.exe</SourceImage>
         <SourceImage condition="contains all">C:\Program Files;\Common
@@ -1273,6 +1288,13 @@ ______     -->
              block-malicious.ps1 -> Invoke-DFIRCollection.ps1 copies suspect files with _DFIR_COPY suffix.
              Without this exclude, the copy itself triggers Sysmon Event 11/29 -> AR fires again -> infinite loop. -->
         <TargetFilename condition="begin with">C:\install-sysmon\dfir-found\</TargetFilename>
+        <!-- 27may2569: HDC_Data_Exchange_Plus = internal MoPH Health Data Center Python+Streamlit app
+             packed with PyInstaller. _MEI<digits>\ pattern is PyInstaller's bootstrap temp folder.
+             Observed 212 events/day on SAKARIN_IBM from rule 92213. Bind app name + PyInstaller pattern. -->
+        <Rule groupRelation="and">
+          <Image condition="end with">\HDC_Data_Exchange_Plus.exe</Image>
+          <TargetFilename condition="contains">\AppData\Local\Temp\_MEI</TargetFilename>
+        </Rule>
         <Image condition="is">C:\Program Files (x86)\Dell\CommandUpdate\InvColPC.exe</Image>
         <Rule groupRelation="and">
           <Image condition="is">C:\Program Files\Elastic\Endpoint\elastic-endpoint.exe</Image>

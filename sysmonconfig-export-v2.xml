@@ -1295,6 +1295,19 @@ ______     -->
           <Image condition="end with">\HDC_Data_Exchange_Plus.exe</Image>
           <TargetFilename condition="contains">\AppData\Local\Temp\_MEI</TargetFilename>
         </Rule>
+        <!-- 28may2569: Microsoft Edge built-in/sideloaded extension CRX unpacker.
+             Folder pattern "msedgecrx_chrome_Unpacker_BeginUnzipping<X>_<Y>" is a string literal
+             from Chromium source (crx_unpacker.cc) - not configurable, not user-controllable.
+             Observed 98 events Laongfang 2026-05-26 (built-in McAfee WebAdvisor) +
+                       129 events PAM-laptop-acer 2026-05-28 (user AdBlock install).
+             Blind-spot guardrails: source must be Edge in admin-write path. JS file drops are
+             NOT the malicious execution surface - other layers still detect: NativeMessaging
+             child processes (EID 1), DLL load (EID 7), network (Suricata), HKCU\..\Edge\Extensions
+             registry writes (Wazuh syscheck). -->
+        <Rule groupRelation="and">
+          <Image condition="end with">\Microsoft\Edge\Application\msedge.exe</Image>
+          <TargetFilename condition="contains">\AppData\Local\Temp\msedgecrx_chrome_Unpacker_BeginUnzipping</TargetFilename>
+        </Rule>
         <Image condition="is">C:\Program Files (x86)\Dell\CommandUpdate\InvColPC.exe</Image>
         <Rule groupRelation="and">
           <Image condition="is">C:\Program Files\Elastic\Endpoint\elastic-endpoint.exe</Image>

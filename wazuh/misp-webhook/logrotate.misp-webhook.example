@@ -1,0 +1,47 @@
+# /etc/logrotate.d/misp-webhook
+#
+# logrotate config for misp-webhook scripts.
+# Keeps 90 days of daily-rotated, compressed logs.
+#
+# Deployment (replace <USER> and <GROUP> with the OS account / its primary group):
+#
+#   # 1. Preflight: ensure the directory is owned by the user (NOT root) and
+#   #    is writable. logrotate copytruncate needs to CREATE a sibling file
+#   #    inside the directory, so directory-write is required even if files
+#   #    themselves are user-owned.
+#   sudo chown <USER>:<GROUP> /home/<USER>/misp-webhook
+#   sudo chmod 750 /home/<USER>/misp-webhook
+#
+#   # 2. Install the config (run from this folder)
+#   sudo cp logrotate.misp-webhook.example /etc/logrotate.d/misp-webhook
+#   sudo sed -i 's|<USER>|youraccount|g; s|<GROUP>|yourgroup|g' /etc/logrotate.d/misp-webhook
+#   sudo chown root:root /etc/logrotate.d/misp-webhook
+#   sudo chmod 644 /etc/logrotate.d/misp-webhook
+#
+#   # 3. Dry run (no changes)
+#   sudo logrotate -d /etc/logrotate.d/misp-webhook
+#
+#   # 4. Force run once for verification
+#   sudo logrotate -fv /etc/logrotate.d/misp-webhook
+#   ls -la /home/<USER>/misp-webhook/{refresh,webhook}.log*
+#
+# Why copytruncate:
+#   webhook.log is written by app.py via logging.basicConfig which keeps the
+#   file handle open. Plain rename-rotate would leave Flask writing to the
+#   renamed file. copytruncate copies the file then truncates the original
+#   in-place so the same inode keeps receiving writes — no Flask reload
+#   needed. We use it for refresh.log too for consistency.
+
+/home/<USER>/misp-webhook/refresh.log
+/home/<USER>/misp-webhook/webhook.log
+{
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 <USER> <GROUP>
+    su <USER> <GROUP>
+}

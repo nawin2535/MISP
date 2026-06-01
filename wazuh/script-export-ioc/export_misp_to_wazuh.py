@@ -21,6 +21,20 @@ BATCH_SIZE = 1000
 MAX_WORKERS = 5
 MAX_RETRIES = 3
 
+# Attribute types that should be time-filtered with --days.
+# Other types (sha256, domain, hostname, ...) are exported in full regardless of age.
+TIME_FILTERED_TYPES = {"ip-src", "ip-dst"}
+
+
+def _publish_timestamp_for(type_attribute, days: int):
+    """Return '<days>d' if this type should be time-filtered, else None.
+    Accepts string or list type_attribute (domain is passed as ['domain','hostname'])."""
+    if days <= 0:
+        return None
+    if isinstance(type_attribute, str) and type_attribute in TIME_FILTERED_TYPES:
+        return f"{days}d"
+    return None
+
 def format_wazuh_entry(attr: Dict) -> Optional[str]:
     """Formats a MISP attribute into a Wazuh CDB compatible string, properly quoting colons."""
     value = attr.get("value")
@@ -34,22 +48,26 @@ def format_wazuh_entry(attr: Dict) -> Optional[str]:
         return f"{value}:Event_{event_id}"
     return None
 
-def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_attribute) -> Optional[List[Dict]]:
-    """Fetches a single page of attributes with retry logic."""
+def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_attribute,
+                          publish_timestamp: Optional[str] = None) -> Optional[List[Dict]]:
+    """Fetches a single page of attributes with retry logic.
+    If publish_timestamp is given (e.g. '300d'), restricts results to that window."""
     print(f"[{type_attribute}] Fetching page {page}...")
-    
+
+    search_kwargs = dict(
+        controller='attributes',
+        type_attribute=type_attribute,
+        to_ids=1,
+        return_format='json',
+        limit=limit,
+        page=page,
+    )
+    if publish_timestamp:
+        search_kwargs['publish_timestamp'] = publish_timestamp
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = misp_instance.search(
-                controller='attributes',
-                type_attribute=type_attribute,
-                to_ids=1,
-                #tags='NCSA',
-                #last='90d',
-                return_format='json',
-                limit=limit,
-                page=page
-            )
+            response = misp_instance.search(**search_kwargs)
             
             if isinstance(response, dict) and 'response' in response:
                 return response['response'].get('Attribute', [])
@@ -67,18 +85,20 @@ def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_att
             
     return None
 
-def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute):
-    print(f"Connecting to MISP for {type_attribute} -> {output_file} with {MAX_WORKERS} workers...")
+def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute, days: int = 0):
+    publish_timestamp = _publish_timestamp_for(type_attribute, days)
+    window_note = f" (publish_timestamp={publish_timestamp})" if publish_timestamp else " (no time filter)"
+    print(f"Connecting to MISP for {type_attribute} -> {output_file} with {MAX_WORKERS} workers{window_note}...")
     total_entries = 0
 
     with open(output_file, 'w', encoding='utf-8') as f:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Initial batch of tasks
             future_to_page = {
-                executor.submit(fetch_page_attributes, misp, page, BATCH_SIZE, type_attribute): page 
+                executor.submit(fetch_page_attributes, misp, page, BATCH_SIZE, type_attribute, publish_timestamp): page
                 for page in range(1, MAX_WORKERS + 1)
             }
-            
+
             next_page_to_submit = MAX_WORKERS + 1
             stop_submission = False
 
@@ -92,7 +112,7 @@ def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute):
                     page = future_to_page.pop(future)
                     try:
                         attributes = future.result()
-                        
+
                         if attributes is None:
                             # A page failed completely after all retries.
                             # Stop submission to prevent infinite looping on a disconnected server.
@@ -106,19 +126,20 @@ def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute):
                                     f.write(f"{entry}\n")
                                     count += 1
                             total_entries += count
-                            
+
                             # If we fetched successfully and got fewer attributes than the limit,
                             # we have reached the end of the data stream.
                             if len(attributes) < BATCH_SIZE:
                                 stop_submission = True
-                        
+
                         if not stop_submission:
                             new_future = executor.submit(
-                                fetch_page_attributes, misp, next_page_to_submit, BATCH_SIZE, type_attribute
+                                fetch_page_attributes, misp, next_page_to_submit, BATCH_SIZE,
+                                type_attribute, publish_timestamp
                             )
                             future_to_page[new_future] = next_page_to_submit
                             next_page_to_submit += 1
-                            
+
                     except Exception as exc:
                         print(f"Page {page} generated an unexpected exception: {exc}")
                         stop_submission = True
@@ -130,7 +151,10 @@ def main():
     parser.add_argument("output_file", nargs="?", default="misp_sha256", help="Output file name or 'all' to export predefined sets.")
     parser.add_argument("--type", dest="type_attribute", default="sha256", help="MISP attribute type (e.g. sha256, ip-src, etc.)")
     parser.add_argument("--output-dir", dest="output_dir", default=".", help="Directory to save the exported files")
-    
+    parser.add_argument("--days", type=int, default=300,
+                        help=f"publish_timestamp window in days, applied ONLY to {sorted(TIME_FILTERED_TYPES)} "
+                             f"(other types pull all). Set 0 to disable. Default: 300")
+
     args = parser.parse_args()
 
     # Create output directory if it doesn't exist
@@ -154,16 +178,16 @@ def main():
             ("misp_domain", ["domain", "hostname"])
         ]
         
-        print("Starting batch export for ALL types...")
+        print(f"Starting batch export for ALL types (days={args.days} for {sorted(TIME_FILTERED_TYPES)})...")
         for out_file, attr_type in tasks:
             full_path = os.path.join(args.output_dir, out_file)
             print(f"\n--- Starting export: {attr_type} -> {full_path} ---")
-            fetch_and_export_attributes(misp, full_path, attr_type)
+            fetch_and_export_attributes(misp, full_path, attr_type, days=args.days)
             print(f"--- Finished export: {attr_type} ---")
     else:
         # Single file export
         full_path = os.path.join(args.output_dir, args.output_file)
-        fetch_and_export_attributes(misp, full_path, args.type_attribute)
+        fetch_and_export_attributes(misp, full_path, args.type_attribute, days=args.days)
 
 if __name__ == "__main__":
     main()

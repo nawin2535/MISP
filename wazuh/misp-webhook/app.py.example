@@ -1,0 +1,81 @@
+# app.py — Flask webhook receiver for MISP feed update notifications.
+# Coalesces ("debounces") bursts of webhook events so refresh.sh runs
+# at most once per quiet window (DEBOUNCE_S seconds after last event).
+#
+# Deployment example:
+#   cp app.py.example app.py
+#   sed -i 's|<USER>|youraccount|g' app.py
+#   # then create the .secret file containing the shared bearer token
+#   echo 'YOUR_LONG_RANDOM_TOKEN' > .secret && chmod 600 .secret
+
+from flask import Flask, request, abort, jsonify
+import os, threading, subprocess, time, logging
+
+ADMIN_HOME  = '/home/<USER>'
+SECRET_FILE = f'{ADMIN_HOME}/misp-webhook/.secret'
+SCRIPT      = f'{ADMIN_HOME}/misp-webhook/refresh.sh'
+DEBOUNCE_S  = 1200   # 20 minutes - wait until "quiet" before running
+LOG_FILE    = f'{ADMIN_HOME}/misp-webhook/webhook.log'
+
+with open(SECRET_FILE) as f:
+    SECRET = f.read().strip()
+
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
+                    format='%(asctime)s [%(levelname)s] %(message)s')
+
+app = Flask(__name__)
+_lock = threading.Lock()
+_timer = {'t': None, 'count': 0, 'first_at': None}
+
+def _runner():
+    with _lock:
+        cnt = _timer['count']
+        first = _timer['first_at']
+        _timer['t'] = None
+        _timer['count'] = 0
+        _timer['first_at'] = None
+    logging.info(f'debounce settled (coalesced {cnt} events since {first}) -> running refresh.sh')
+    try:
+        rc = subprocess.run([SCRIPT], capture_output=True, text=True, timeout=600)
+        logging.info(f'refresh.sh exit={rc.returncode}')
+    except subprocess.TimeoutExpired:
+        logging.error('refresh.sh TIMEOUT (>600s)')
+    except Exception as e:
+        logging.error(f'refresh.sh exception: {e}')
+
+@app.route('/misp-update', methods=['POST'])
+def hook():
+    auth = request.headers.get('Authorization', '')
+    if auth != f'Bearer {SECRET}':
+        logging.warning(f'auth failed from {request.remote_addr}')
+        abort(401)
+    body = request.get_json(silent=True) or {}
+    logging.info(f'received from {request.remote_addr} body={body}')
+
+    with _lock:
+        was_pending = _timer['t'] is not None
+        if was_pending:
+            _timer['t'].cancel()
+        else:
+            _timer['first_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        _timer['count'] += 1
+        t = threading.Timer(DEBOUNCE_S, _runner)
+        t.daemon = True
+        _timer['t'] = t
+        t.start()
+
+    status = 'timer_reset' if was_pending else 'queued'
+    return jsonify({
+        'status': status,
+        'will_run_in_s': DEBOUNCE_S,
+        'coalesced_count': _timer['count'],
+    }), 202
+
+@app.route('/health', methods=['GET'])
+def health():
+    with _lock:
+        pending = _timer['t'] is not None
+    return jsonify({'status': 'ok', 'pending_refresh': pending}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8765)

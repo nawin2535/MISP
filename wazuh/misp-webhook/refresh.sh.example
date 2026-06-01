@@ -1,0 +1,37 @@
+#!/bin/bash
+# refresh.sh — triggered by MISP webhook (via app.py debounce) to refresh
+# Wazuh CDB lists from MISP. Copy this file to refresh.sh, edit ADMIN_HOME
+# below to match your deployment, then chmod +x.
+#
+# Deployment example (replace <USER> with the OS account that owns the scripts):
+#   cp refresh.sh.example refresh.sh
+#   sed -i 's|<USER>|youraccount|g' refresh.sh
+#   chmod +x refresh.sh
+
+ADMIN_HOME=/home/<USER>
+LOG=${ADMIN_HOME}/misp-webhook/refresh.log
+VENV_PY=${ADMIN_HOME}/script-export-ioc/venv/bin/python3
+EXPORT_PY=${ADMIN_HOME}/script-export-ioc/export_misp_to_wazuh.py
+OUT_DIR=/var/ossec/etc/lists
+
+echo "[$(date '+%F %T')] === refresh start ===" >> $LOG
+
+${ADMIN_HOME}/script-export-ioc/misp_to_wazuh.sh --days 300 >> $LOG 2>&1 || { echo "[$(date '+%F %T')] misp_to_wazuh.sh FAIL" >> $LOG; exit 1; }
+
+# --days only applies to ip-src/ip-dst (gated by TIME_FILTERED_TYPES in export_misp_to_wazuh.py)
+# Pass it explicitly so behavior doesn't silently change if the Python default is altered.
+for t in sha256 domain ip-dst ip-src; do
+  case "$t" in
+    ip-src|ip-dst) EXTRA_ARGS=(--days 300) ;;
+    *)             EXTRA_ARGS=() ;;
+  esac
+  $VENV_PY $EXPORT_PY "misp_$t" --type $t --output-dir $OUT_DIR "${EXTRA_ARGS[@]}" >> $LOG 2>&1 \
+    || { echo "[$(date '+%F %T')] export $t FAIL" >> $LOG; exit 2; }
+done
+
+${ADMIN_HOME}/script-export-ioc/reformat_misp_sha256.sh >> $LOG 2>&1
+
+sudo systemctl restart wazuh-manager >> $LOG 2>&1 \
+  || { echo "[$(date '+%F %T')] restart wazuh-manager FAIL" >> $LOG; exit 3; }
+
+echo "[$(date '+%F %T')] === refresh done OK ===" >> $LOG

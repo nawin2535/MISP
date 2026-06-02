@@ -23,7 +23,12 @@ param(
     [string]$Format = 'text',
     [int]   $ToIds  = 1,
     [string]$Save   = '',
-    [switch]$ShowRequest
+    [switch]$ShowRequest,
+    # Which time filter to use. Default 'attribute_timestamp' because
+    # publish_timestamp returns stale IoCs whose parent event was re-published
+    # even though the attribute itself hasn't been touched in months.
+    [ValidateSet('attribute_timestamp','publish_timestamp','timestamp','event_timestamp')]
+    [string]$FilterParam = 'attribute_timestamp'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,16 +55,16 @@ $skipCert = ($VerifySsl -and $VerifySsl.ToLower() -in @('false','0','f','no'))
 # --- Build URL + Body depending on Method ---
 $base = $MispUrl.TrimEnd('/')
 if ($Method -eq 'GET') {
-    $url  = "$base/attributes/restSearch/returnFormat:$Format/type:$Type/to_ids:$ToIds/publish_timestamp:${Days}d"
+    $url  = "$base/attributes/restSearch/returnFormat:$Format/type:$Type/to_ids:$ToIds/${FilterParam}:${Days}d"
     $body = $null
 } else {
     $url  = "$base/attributes/restSearch"
     $bodyObj = @{
-        returnFormat       = $Format
-        type               = $Type
-        to_ids             = $ToIds
-        publish_timestamp  = "${Days}d"
+        returnFormat = $Format
+        type         = $Type
+        to_ids       = $ToIds
     }
+    $bodyObj[$FilterParam] = "${Days}d"
     $body = $bodyObj | ConvertTo-Json -Compress
 }
 

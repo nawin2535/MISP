@@ -11,11 +11,17 @@
 #   ./test-misp-restsearch.sh out.txt                               # save body to file
 #
 # Env overrides:
-#   METHOD=GET|POST   (default GET)
-#   TYPE=ip-src       (default ip-src)
-#   DAYS=300          (default 300)
-#   FORMAT=text|json|csv  (default text)
-#   TO_IDS=1          (default 1)
+#   METHOD=GET|POST                     (default GET)
+#   TYPE=ip-src                         (default ip-src)
+#   DAYS=300                            (default 300)
+#   FORMAT=text|json|csv                (default text)
+#   TO_IDS=1                            (default 1)
+#   FILTER_PARAM=attribute_timestamp    (default attribute_timestamp; alternatives:
+#                                        publish_timestamp / timestamp / event_timestamp.
+#                                        attribute_timestamp filters on the attribute's
+#                                        own last-edit time - re-publishing the parent
+#                                        event does NOT bump it, so stale IoCs from
+#                                        re-published events are excluded.)
 
 set -euo pipefail
 
@@ -35,6 +41,7 @@ TYPE="${TYPE:-ip-src}"
 DAYS="${DAYS:-300}"
 FORMAT="${FORMAT:-text}"
 TO_IDS="${TO_IDS:-1}"
+FILTER_PARAM="${FILTER_PARAM:-attribute_timestamp}"
 SAVE="${1:-}"
 
 BASE="${MISP_URL%/}"
@@ -53,12 +60,12 @@ esac
 
 # --- Build URL + body ---
 if [[ "$METHOD" == "GET" ]]; then
-    URL="$BASE/attributes/restSearch/returnFormat:$FORMAT/type:$TYPE/to_ids:$TO_IDS/publish_timestamp:${DAYS}d"
+    URL="$BASE/attributes/restSearch/returnFormat:$FORMAT/type:$TYPE/to_ids:$TO_IDS/${FILTER_PARAM}:${DAYS}d"
     BODY_ARGS=()
 else
     URL="$BASE/attributes/restSearch"
-    BODY=$(printf '{"returnFormat":"%s","type":"%s","to_ids":%s,"publish_timestamp":"%sd"}' \
-                  "$FORMAT" "$TYPE" "$TO_IDS" "$DAYS")
+    BODY=$(printf '{"returnFormat":"%s","type":"%s","to_ids":%s,"%s":"%sd"}' \
+                  "$FORMAT" "$TYPE" "$TO_IDS" "$FILTER_PARAM" "$DAYS")
     BODY_ARGS=(-H 'Content-Type: application/json' --data-raw "$BODY")
 fi
 

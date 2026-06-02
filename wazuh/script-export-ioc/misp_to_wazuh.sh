@@ -4,8 +4,16 @@
 # Loads MISP_URL / MISP_API_KEY / MISP_VERIFY_SSL from .env in this folder
 # (matches export_misp_to_wazuh.py behavior).
 #
-# Time filter (--days N) is applied to BOTH ip-src and ip-dst, matching the
-# TIME_FILTERED_TYPES = {ip-src, ip-dst} contract in export_misp_to_wazuh.py.
+# Time filter (--days N) uses MISP's attribute_timestamp parameter, applied
+# to BOTH ip-src and ip-dst (matches TIME_FILTERED_TYPES contract in
+# export_misp_to_wazuh.py).
+#
+# Why attribute_timestamp NOT publish_timestamp:
+#   publish_timestamp filters on when the PARENT EVENT was last published.
+#   Feed operators routinely re-publish events to refresh tags/galaxies,
+#   which makes stale IoCs (added many months ago) leak through. Switched
+#   to attribute_timestamp on 2026-06-01 after observing 2025-07 IoCs
+#   returned by a 300d publish_timestamp filter.
 #
 # Usage:
 #   ./misp_to_wazuh.sh                   # default 300 days
@@ -50,7 +58,7 @@ esac
 BASE="${MISP_URL%/}"
 COMMON_FILTERS="returnFormat:text/to_ids:1"
 if [[ "$DAYS" -gt 0 ]]; then
-    COMMON_FILTERS="$COMMON_FILTERS/publish_timestamp:${DAYS}d"
+    COMMON_FILTERS="$COMMON_FILTERS/attribute_timestamp:${DAYS}d"
 fi
 URL_SRC="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-src"
 URL_DST="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-dst"
@@ -82,7 +90,7 @@ fetch_misp() {
     printf -v "$out_var" '%s' "$body"
 }
 
-window_note=$([[ "$DAYS" -gt 0 ]] && echo "publish_timestamp=${DAYS}d" || echo "no time filter")
+window_note=$([[ "$DAYS" -gt 0 ]] && echo "attribute_timestamp=${DAYS}d" || echo "no time filter")
 echo "$(date '+%F %T') INFO: Fetching ip-src + ip-dst from MISP ($window_note)"
 
 response_src=""; response_dst=""

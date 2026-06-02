@@ -25,8 +25,15 @@ MAX_RETRIES = 3
 # Other types (sha256, domain, hostname, ...) are exported in full regardless of age.
 TIME_FILTERED_TYPES = {"ip-src", "ip-dst"}
 
+# MISP REST parameter used for --days. We use attribute_timestamp (NOT
+# publish_timestamp) because publish_timestamp filters on when the parent
+# event was last published — operators re-publish events to refresh tags,
+# which lets stale IoCs (added many months ago) leak through. Switched
+# 2026-06-01 after observing 2025-07 IoCs returned by a 300d filter.
+TIME_FILTER_PARAM = "attribute_timestamp"
 
-def _publish_timestamp_for(type_attribute, days: int):
+
+def _age_filter_value(type_attribute, days: int):
     """Return '<days>d' if this type should be time-filtered, else None.
     Accepts string or list type_attribute (domain is passed as ['domain','hostname'])."""
     if days <= 0:
@@ -49,9 +56,10 @@ def format_wazuh_entry(attr: Dict) -> Optional[str]:
     return None
 
 def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_attribute,
-                          publish_timestamp: Optional[str] = None) -> Optional[List[Dict]]:
+                          age_filter: Optional[str] = None) -> Optional[List[Dict]]:
     """Fetches a single page of attributes with retry logic.
-    If publish_timestamp is given (e.g. '300d'), restricts results to that window."""
+    If age_filter is given (e.g. '300d'), restricts results via TIME_FILTER_PARAM
+    (default attribute_timestamp)."""
     print(f"[{type_attribute}] Fetching page {page}...")
 
     search_kwargs = dict(
@@ -62,8 +70,8 @@ def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_att
         limit=limit,
         page=page,
     )
-    if publish_timestamp:
-        search_kwargs['publish_timestamp'] = publish_timestamp
+    if age_filter:
+        search_kwargs[TIME_FILTER_PARAM] = age_filter
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -86,8 +94,8 @@ def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_att
     return None
 
 def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute, days: int = 0):
-    publish_timestamp = _publish_timestamp_for(type_attribute, days)
-    window_note = f" (publish_timestamp={publish_timestamp})" if publish_timestamp else " (no time filter)"
+    age_filter = _age_filter_value(type_attribute, days)
+    window_note = f" ({TIME_FILTER_PARAM}={age_filter})" if age_filter else " (no time filter)"
     print(f"Connecting to MISP for {type_attribute} -> {output_file} with {MAX_WORKERS} workers{window_note}...")
     total_entries = 0
 
@@ -95,7 +103,7 @@ def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute, 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Initial batch of tasks
             future_to_page = {
-                executor.submit(fetch_page_attributes, misp, page, BATCH_SIZE, type_attribute, publish_timestamp): page
+                executor.submit(fetch_page_attributes, misp, page, BATCH_SIZE, type_attribute, age_filter): page
                 for page in range(1, MAX_WORKERS + 1)
             }
 
@@ -135,7 +143,7 @@ def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute, 
                         if not stop_submission:
                             new_future = executor.submit(
                                 fetch_page_attributes, misp, next_page_to_submit, BATCH_SIZE,
-                                type_attribute, publish_timestamp
+                                type_attribute, age_filter
                             )
                             future_to_page[new_future] = next_page_to_submit
                             next_page_to_submit += 1
@@ -152,7 +160,7 @@ def main():
     parser.add_argument("--type", dest="type_attribute", default="sha256", help="MISP attribute type (e.g. sha256, ip-src, etc.)")
     parser.add_argument("--output-dir", dest="output_dir", default=".", help="Directory to save the exported files")
     parser.add_argument("--days", type=int, default=300,
-                        help=f"publish_timestamp window in days, applied ONLY to {sorted(TIME_FILTERED_TYPES)} "
+                        help=f"{TIME_FILTER_PARAM} window in days, applied ONLY to {sorted(TIME_FILTERED_TYPES)} "
                              f"(other types pull all). Set 0 to disable. Default: 300")
 
     args = parser.parse_args()

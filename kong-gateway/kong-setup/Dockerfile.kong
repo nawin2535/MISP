@@ -1,0 +1,12 @@
+FROM kong:3.9
+USER root
+# คัดลอกไฟล์กำหนดค่า Kong เพื่อให้แน่ใจว่า Nginx รันด้วย root
+RUN echo "user root;" > /etc/kong/nginx.conf \
+    && apt update && apt install -y tzdata \
+    && ln -fs /usr/share/zoneinfo/Asia/Bangkok /etc/localtime \
+    && echo "Asia/Bangkok" > /etc/timezone \
+    && dpkg-reconfigure -f noninteractive tzdata \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+### docker build -f Dockerfile.kong -t kong-root:3.9 . ###

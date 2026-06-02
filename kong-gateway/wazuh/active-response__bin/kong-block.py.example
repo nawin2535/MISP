@@ -1,0 +1,174 @@
+#!/usr/bin/python3
+# kong-block.py — Wazuh active-response handler that calls kongblock.sh.
+# Classifies the trigger rule.id into:
+#   - "misp"     for rules that fire from blacklist-ip CDB match (auto-unblock by reconcile)
+#   - "behavior" for rules that detect attack patterns (never auto-unblocked)
+# Passes --source + --rule-id to kongblock.sh so the reconcile script knows
+# which manifest to track this IP under.
+
+import os
+import sys
+import json
+import datetime
+import subprocess
+from pathlib import PureWindowsPath, PurePosixPath
+import logging
+
+if os.name == 'nt':
+    LOG_FILE = "C:\\Program Files (x86)\\ossec-agent\\active-response\\active-responses.log"
+else:
+    LOG_FILE = "/var/ossec/logs/active-responses.log"
+
+# Deployment: copy this file to kong-block.py and run
+#   sed -i 's|<USER>|youraccount|g' kong-block.py
+# before installing to /var/ossec/active-response/bin/
+KONGBLOCK_SH = "/home/<USER>/kong-setup/kongblock.sh"
+
+# rule.id classification — keep in sync with local_rules.xml on wazuh-manager.
+# MISP rules use <list field="srcip" lookup="address_match_key">etc/lists/blacklist-ip</list>
+# All other rules in the kong-block AR rules_id list are behavioral.
+MISP_RULE_IDS = {100203, 100204, 100205, 100206}
+
+ADD_COMMAND = 0
+DELETE_COMMAND = 1
+CONTINUE_COMMAND = 2
+ABORT_COMMAND = 3
+OS_SUCCESS = 0
+OS_INVALID = -1
+
+logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format='%(asctime)s kong-block: %(message)s')
+
+
+class message:
+    def __init__(self):
+        self.alert = ""
+        self.command = 0
+
+
+def write_debug_file(ar_name, msg):
+    ar_name_posix = str(PurePosixPath(PureWindowsPath(ar_name[ar_name.find("active-response"):])))
+    logging.debug(f"{ar_name_posix}: {msg}")
+
+
+def write_ossec_log(msg):
+    with open("/var/ossec/logs/ossec.log", mode="a") as log_file:
+        log_file.write(str(datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')) + " kong-block: " + msg + "\n")
+
+
+def setup_and_check_message(argv):
+    input_str = sys.stdin.readline().strip()
+    write_debug_file(argv[0], input_str)
+    try:
+        data = json.loads(input_str)
+    except ValueError as e:
+        write_debug_file(argv[0], f"Decoding JSON has failed: {e}")
+        return message()
+    msg = message()
+    msg.alert = data
+    command = data.get("command")
+    if command == "add":
+        msg.command = ADD_COMMAND
+    elif command == "delete":
+        msg.command = DELETE_COMMAND
+    else:
+        msg.command = OS_INVALID
+        write_debug_file(argv[0], f"Not valid command: {command}")
+    return msg
+
+
+def send_keys_and_check_message(argv, keys):
+    keys_msg = json.dumps({"version": 1, "origin": {"name": argv[0], "module": "active-response"},
+                           "command": "check_keys", "parameters": {"keys": keys}})
+    write_debug_file(argv[0], keys_msg)
+    print(keys_msg)
+    sys.stdout.flush()
+    input_str = sys.stdin.readline().strip()
+    write_debug_file(argv[0], input_str)
+    try:
+        data = json.loads(input_str)
+    except ValueError:
+        write_debug_file(argv[0], 'Decoding JSON has failed, invalid input format')
+        return OS_INVALID
+    action = data.get("command")
+    if action == "continue":
+        return CONTINUE_COMMAND
+    elif action == "abort":
+        return ABORT_COMMAND
+    else:
+        write_debug_file(argv[0], f"Invalid value of 'command': {action}")
+        return OS_INVALID
+
+
+def classify_source(rule_id_raw):
+    """Return ('misp'|'behavior', rule_id_int). Returns ('behavior', 0) if rule_id is unparseable
+    so unknown alerts default to the conservative side (never auto-unblocked)."""
+    try:
+        rid = int(rule_id_raw)
+    except (TypeError, ValueError):
+        return ("behavior", 0)
+    return ("misp" if rid in MISP_RULE_IDS else "behavior", rid)
+
+
+def main(argv):
+    write_debug_file(argv[0], "Started")
+    msg = setup_and_check_message(argv)
+    if msg.command < 0:
+        sys.exit(OS_INVALID)
+
+    alert = msg.alert["parameters"]["alert"]
+    rule_id_raw = alert.get("rule", {}).get("id")
+    source, rule_id = classify_source(rule_id_raw)
+    src_ip = alert.get("data", {}).get("srcip")
+
+    # Refuse to act on missing srcip (the old default '100.100.100.100' fallback
+    # was dangerous - CGNAT IP for AIS Thailand).
+    if not src_ip:
+        write_debug_file(argv[0], f"No srcip in alert (rule={rule_id_raw}) - aborting")
+        write_ossec_log(f"No srcip in alert (rule={rule_id_raw}) - aborting")
+        sys.exit(OS_INVALID)
+
+    if msg.command == ADD_COMMAND:
+        keys = [str(rule_id)]
+        action_check = send_keys_and_check_message(argv, keys)
+        if action_check != CONTINUE_COMMAND:
+            write_debug_file(argv[0], "Aborted" if action_check == ABORT_COMMAND else "Invalid command")
+            sys.exit(OS_SUCCESS if action_check == ABORT_COMMAND else OS_INVALID)
+        try:
+            cmd = [KONGBLOCK_SH, "--ip", src_ip, "--deny",
+                   "--source", source, "--rule-id", str(rule_id)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            write_debug_file(argv[0], f"Blocked {src_ip} (source={source} rule={rule_id}): {result.stdout.strip()}")
+            write_ossec_log(f"Blocked {src_ip} (source={source} rule={rule_id})")
+            print(json.dumps({"version": 1, "command": "success",
+                              "message": f"IP {src_ip} blocked (source={source})."}))
+        except (subprocess.CalledProcessError, BrokenPipeError) as e:
+            stderr = getattr(e, 'stderr', '')
+            write_debug_file(argv[0], f"Failed to block {src_ip}: {e} | stderr={stderr}")
+            write_ossec_log(f"Failed to block {src_ip}: {e}")
+            print(json.dumps({"version": 1, "command": "failure",
+                              "message": f"Failed to block IP {src_ip}: {e}"}))
+            sys.exit(OS_INVALID)
+
+    elif msg.command == DELETE_COMMAND:
+        try:
+            cmd = [KONGBLOCK_SH, "--ip", src_ip, "--allow",
+                   "--source", source, "--rule-id", str(rule_id)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            write_debug_file(argv[0], f"Unblocked {src_ip} (source={source} rule={rule_id}): {result.stdout.strip()}")
+            write_ossec_log(f"Unblocked {src_ip} (source={source} rule={rule_id})")
+            print(json.dumps({"version": 1, "command": "success",
+                              "message": f"IP {src_ip} unblocked."}))
+        except (subprocess.CalledProcessError, BrokenPipeError) as e:
+            stderr = getattr(e, 'stderr', '')
+            write_debug_file(argv[0], f"Failed to unblock {src_ip}: {e} | stderr={stderr}")
+            write_ossec_log(f"Failed to unblock {src_ip}: {e}")
+            print(json.dumps({"version": 1, "command": "failure",
+                              "message": f"Failed to unblock IP {src_ip}: {e}"}))
+            sys.exit(OS_INVALID)
+
+    write_debug_file(argv[0], "Ended")
+    sys.exit(OS_SUCCESS)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

@@ -4,6 +4,11 @@
 # block state against MISP feed.
 #
 # Deployment (replace <USER>):
+#   # 1. Create venv + install Flask (isolates dependency from system python)
+#   sudo -u <USER> python3 -m venv /home/<USER>/misp-webhook-kong/venv
+#   sudo -u <USER> /home/<USER>/misp-webhook-kong/venv/bin/pip install flask
+#
+#   # 2. Install systemd unit
 #   sudo cp kong-misp-webhook.service.example /etc/systemd/system/kong-misp-webhook.service
 #   sudo sed -i 's|<USER>|youraccount|g' /etc/systemd/system/kong-misp-webhook.service
 #   sudo systemctl daemon-reload
@@ -29,7 +34,7 @@ Type=simple
 User=<USER>
 Group=<USER>
 WorkingDirectory=/home/<USER>/misp-webhook-kong
-ExecStart=/usr/bin/python3 /home/<USER>/misp-webhook-kong/app.py
+ExecStart=/home/<USER>/misp-webhook-kong/venv/bin/python3 /home/<USER>/misp-webhook-kong/app.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/home/<USER>/misp-webhook-kong/service.log

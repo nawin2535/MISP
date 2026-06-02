@@ -1,0 +1,44 @@
+# /etc/systemd/system/kong-misp-webhook.service
+#
+# systemd unit for the Flask webhook receiver that reconciles Kong+firewalld
+# block state against MISP feed.
+#
+# Deployment (replace <USER>):
+#   sudo cp kong-misp-webhook.service.example /etc/systemd/system/kong-misp-webhook.service
+#   sudo sed -i 's|<USER>|youraccount|g' /etc/systemd/system/kong-misp-webhook.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kong-misp-webhook.service
+#   sudo systemctl status kong-misp-webhook.service
+#   curl -s http://localhost:8766/health         # quick check
+#
+# Open the listening port in firewalld if MISP server connects from outside the host:
+#   sudo firewall-cmd --add-port=8766/tcp --permanent
+#   sudo firewall-cmd --reload
+#
+# NOTE: the .env in /home/<USER>/kong-setup/ provides MISP_API_KEY for
+# reconcile-kong-misp.sh. The .secret in /home/<USER>/misp-webhook-kong/
+# is the bearer token the MISP webhook sends to authenticate to this listener.
+
+[Unit]
+Description=Kong MISP Webhook Receiver (debounced reconcile)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+Group=<USER>
+WorkingDirectory=/home/<USER>/misp-webhook-kong
+ExecStart=/usr/bin/python3 /home/<USER>/misp-webhook-kong/app.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/<USER>/misp-webhook-kong/service.log
+StandardError=append:/home/<USER>/misp-webhook-kong/service.log
+
+# Allow the service user to invoke firewall-cmd + Kong API via reconcile.sh.
+# If reconcile-kong-misp.sh requires sudo for firewall-cmd, configure NOPASSWD
+# in /etc/sudoers.d/kong-misp-webhook for the specific commands needed.
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

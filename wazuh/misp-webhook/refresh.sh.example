@@ -8,7 +8,7 @@
 #   sed -i 's|<USER>|youraccount|g' refresh.sh
 #   chmod +x refresh.sh
 
-ADMIN_HOME=/home/<USER>
+ADMIN_HOME='/home/<USER>'
 LOG=${ADMIN_HOME}/misp-webhook/refresh.log
 VENV_PY=${ADMIN_HOME}/script-export-ioc/venv/bin/python3
 EXPORT_PY=${ADMIN_HOME}/script-export-ioc/export_misp_to_wazuh.py

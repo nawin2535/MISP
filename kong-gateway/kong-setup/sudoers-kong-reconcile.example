@@ -1,0 +1,35 @@
+# /etc/sudoers.d/zz-kong-reconcile
+#
+# Allow the kong-reconcile service user to invoke firewall-cmd without
+# password. reconcile-kong-misp.sh needs sudo for:
+#   - firewall-cmd --list-rich-rules           (bootstrap)
+#   - firewall-cmd --remove-rich-rule=...      (per-IP unblock)
+#   - firewall-cmd --runtime-to-permanent      (persist)
+#   - firewall-cmd --reload                    (apply)
+#   - firewall-cmd --state                     (preflight check)
+#
+# kongblock.sh and kong-block.py do NOT need root - they only touch the
+# Kong Admin API on localhost:8001 and user-home manifest files.
+#
+# IMPORTANT — filename starts with "zz-" so it is loaded LAST from
+# /etc/sudoers.d/ (which is processed alphabetically). If the user is in the
+# wheel group, /etc/sudoers contains "%wheel ALL=(ALL) ALL" which matches
+# every command WITH password. In sudoers the LAST matching rule wins, so our
+# NOPASSWD rule must come after the wheel rule. Without the zz- prefix the
+# wheel rule overrides NOPASSWD and sudo will still prompt for a password.
+#
+# Deployment (replace <USER>):
+#   sudo cp sudoers-kong-reconcile.example /etc/sudoers.d/zz-kong-reconcile
+#   sudo sed -i 's|<USER>|youraccount|g' /etc/sudoers.d/zz-kong-reconcile
+#   sudo chown root:root /etc/sudoers.d/zz-kong-reconcile
+#   sudo chmod 440 /etc/sudoers.d/zz-kong-reconcile
+#
+#   # validate syntax BEFORE leaving the shell (broken sudoers can lock you out)
+#   sudo visudo -cf /etc/sudoers.d/zz-kong-reconcile
+#   # expect: "/etc/sudoers.d/zz-kong-reconcile: parsed OK"
+#
+# After install, verify as the service user:
+#   sudo -u <USER> sudo -n firewall-cmd --state
+#   # expect: "running"  (no password prompt)
+
+<USER> ALL=(root) NOPASSWD: /usr/bin/firewall-cmd

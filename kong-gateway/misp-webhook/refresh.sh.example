@@ -1,0 +1,30 @@
+#!/bin/bash
+# refresh.sh — triggered by MISP webhook (via app.py debounce) on kong-gateway.
+# Runs the reconcile-kong-misp.sh script to unblock aged-out MISP IPs from
+# Kong's ip-restriction plugin and firewalld rich-rules.
+#
+# Deployment (replace <USER>):
+#   cp refresh.sh.example refresh.sh
+#   sed -i 's|<USER>|youraccount|g' refresh.sh
+#   chmod +x refresh.sh
+
+ADMIN_HOME='/home/<USER>'
+LOG=${ADMIN_HOME}/misp-webhook-kong/refresh.log
+RECONCILE=${ADMIN_HOME}/kong-setup/reconcile-kong-misp.sh
+
+echo "[$(date '+%F %T')] === refresh start (kong-gateway) ===" >> $LOG
+
+if [[ ! -x "$RECONCILE" ]]; then
+    echo "[$(date '+%F %T')] ERROR: $RECONCILE not executable" >> $LOG
+    exit 1
+fi
+
+"$RECONCILE" >> $LOG 2>&1
+rc=$?
+
+if [[ $rc -eq 0 ]]; then
+    echo "[$(date '+%F %T')] === refresh done OK ===" >> $LOG
+else
+    echo "[$(date '+%F %T')] === refresh FAILED rc=$rc ===" >> $LOG
+fi
+exit $rc

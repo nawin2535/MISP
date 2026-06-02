@@ -1,0 +1,42 @@
+# /etc/logrotate.d/kong-misp-webhook
+#
+# 90-day daily rotation for kong-gateway's MISP webhook + reconcile logs.
+# Mirrors the wazuh-manager misp-webhook logrotate config (uses copytruncate
+# because the Flask app keeps webhook.log open via logging.basicConfig).
+#
+# Deployment (replace <USER> and <GROUP> — usually same as user, sometimes
+# differs from <USER>):
+#
+#   # 1. Preflight: directory must be owned by the user (NOT root) and writable
+#   sudo chown <USER>:<GROUP> /home/<USER>/misp-webhook-kong
+#   sudo chmod 750 /home/<USER>/misp-webhook-kong
+#   sudo chown <USER>:<GROUP> /home/<USER>/kong-setup
+#   sudo chmod 750 /home/<USER>/kong-setup
+#
+#   # 2. Install config
+#   sudo cp logrotate.kong-misp-webhook.example /etc/logrotate.d/kong-misp-webhook
+#   sudo sed -i 's|<USER>|youraccount|g; s|<GROUP>|yourgroup|g' /etc/logrotate.d/kong-misp-webhook
+#   sudo chown root:root /etc/logrotate.d/kong-misp-webhook
+#   sudo chmod 644 /etc/logrotate.d/kong-misp-webhook
+#
+#   # 3. Verify
+#   sudo logrotate -d /etc/logrotate.d/kong-misp-webhook
+#   sudo logrotate -fv /etc/logrotate.d/kong-misp-webhook
+
+/home/<USER>/misp-webhook-kong/webhook.log
+/home/<USER>/misp-webhook-kong/refresh.log
+/home/<USER>/misp-webhook-kong/service.log
+/home/<USER>/kong-setup/reconcile.log
+/home/<USER>/kong-setup/kongblock.log
+/home/<USER>/kong-setup/kongblock-audit.log
+{
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 <USER> <GROUP>
+    su <USER> <GROUP>
+}

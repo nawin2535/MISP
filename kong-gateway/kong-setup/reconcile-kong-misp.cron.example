@@ -1,0 +1,25 @@
+# /etc/cron.d/reconcile-kong-misp
+#
+# Daily fallback reconciliation of Kong + firewalld block state against MISP.
+# Runs 30 minutes before wazuh-manager's MISP refresh (04:39) so that any IP
+# aged-out of MISP overnight is also unblocked on kong-gateway before the
+# next day's Wazuh-AR cycle.
+#
+# This is a SAFETY NET — primary trigger is MISP webhook -> kong-misp-webhook
+# (Flask) -> refresh.sh -> reconcile-kong-misp.sh. If the webhook misses an
+# event (network blip, service restart), this cron catches up.
+#
+# Deployment (replace <USER>):
+#   sudo cp reconcile-kong-misp.cron.example /etc/cron.d/reconcile-kong-misp
+#   sudo sed -i 's|<USER>|youraccount|g' /etc/cron.d/reconcile-kong-misp
+#   sudo chown root:root /etc/cron.d/reconcile-kong-misp
+#   sudo chmod 644 /etc/cron.d/reconcile-kong-misp
+#
+# Verify with:
+#   sudo grep CRON /var/log/cron | grep reconcile
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# minute hour day month dow user command
+30 4 * * * <USER> /home/<USER>/kong-setup/reconcile-kong-misp.sh >> /home/<USER>/kong-setup/reconcile.log 2>&1

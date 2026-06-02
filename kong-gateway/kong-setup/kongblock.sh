@@ -34,6 +34,10 @@ MANIFEST_BEHAVIOR="${SCRIPT_DIR}/blocked-behavior.txt"
 LOG_FILE="${SCRIPT_DIR}/kongblock.log"
 AUDIT_LOG="${SCRIPT_DIR}/kongblock-audit.log"
 LOCK_FILE="${SCRIPT_DIR}/.kongblock.lock"
+# Per-user tmp file to avoid permission clashes when both root + service user
+# invoke kongblock.sh against the same /tmp path.
+ERR_FILE="${SCRIPT_DIR}/.kongblock.err.$$"
+trap 'rm -f "$ERR_FILE"' EXIT
 
 # --- Helpers ---
 log() {
@@ -89,7 +93,7 @@ touch "$MANIFEST_MISP" "$MANIFEST_BEHAVIOR" "$TESTBLOCK_FILE" "$AUDIT_LOG"
 # --- Kong API helpers ---
 get_plugin_config() {
     local pid="$1"
-    curl -sS -X GET "$KONG_ADMIN_URL/plugins/$pid" 2>/tmp/kongblock.err | jq ".config"
+    curl -sS -X GET "$KONG_ADMIN_URL/plugins/$pid" 2>"$ERR_FILE" | jq ".config"
 }
 
 update_plugin() {
@@ -119,13 +123,13 @@ update_plugin() {
 
     response=$(curl -sS -X PATCH "$KONG_ADMIN_URL/plugins/$pid" \
         -H "Content-Type: application/json" \
-        -d "$payload" 2>/tmp/kongblock.err)
+        -d "$payload" 2>"$ERR_FILE")
 
     if echo "$response" | jq -e ".id" >/dev/null 2>&1; then
         log "Kong plugin updated: $ip $action"
         return 0
     else
-        log "ERROR Kong API: $response | $(cat /tmp/kongblock.err 2>/dev/null)"
+        log "ERROR Kong API: $response | $(cat "$ERR_FILE" 2>/dev/null)"
         return 1
     fi
 }

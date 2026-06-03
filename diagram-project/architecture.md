@@ -15,18 +15,19 @@
 ## 1. ภาพรวมระบบ (High-level Architecture)
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'lineColor':'#2c2c2c'}}}%%
 flowchart LR
-    classDef external fill:#e1f0d4,stroke:#2d5016,color:#1a1a1a
-    classDef server fill:#cfe2f3,stroke:#1c4587,color:#1a1a1a
-    classDef agent fill:#fff2cc,stroke:#7f6000,color:#1a1a1a
-    classDef ai fill:#ead1dc,stroke:#660066,color:#1a1a1a
-    classDef output fill:#d9d2e9,stroke:#20124d,color:#1a1a1a
+    classDef external fill:#e1f0d4,stroke:#2d5016,stroke-width:2px,color:#1a1a1a
+    classDef server fill:#cfe2f3,stroke:#1c4587,stroke-width:2px,color:#1a1a1a
+    classDef agent fill:#fff2cc,stroke:#7f6000,stroke-width:2px,color:#1a1a1a
+    classDef ai fill:#ead1dc,stroke:#660066,stroke-width:2px,color:#1a1a1a
+    classDef output fill:#d9d2e9,stroke:#20124d,stroke-width:2px,color:#1a1a1a
 
-    MISP[("MISP Threat Intel<br/>misp-mdo.moph.go.th<br/>28K+ IoCs")]:::external
+    MISP[("MISP Threat Intel<br/>28K+ IoCs")]:::external
 
     subgraph WM["Wazuh Manager (Alma Linux)"]
         direction TB
-        CDB[("CDB blacklist-ip<br/>/var/ossec/etc/lists")]
+        CDB[("CDB blacklist-ip")]
         Rules["local_rules.xml<br/>+ ruleset 110xxx,100xxx"]
         ARDispatch["Active-Response<br/>dispatcher"]
         WebhookM["misp-webhook :8765<br/>(Flask debounce 20m)"]
@@ -41,7 +42,7 @@ flowchart LR
         direction TB
         KongPlugin["Kong ip-restriction<br/>plugin deny[]"]
         FW["firewalld<br/>rich-rules drop"]
-        WebhookK["kong-misp-webhook<br/>:8766 (Flask)"]
+        WebhookK["kong-misp-webhook :8766<br/>(Flask)"]
         Reconcile["reconcile-<br/>kong-misp.sh"]
         WazuhAgentK["wazuh-agent"]
         WebhookK --> Reconcile
@@ -59,10 +60,13 @@ flowchart LR
         direction TB
         Sysmon["Sysmon<br/>(config v2)"]
         WazuhAgentW["wazuh-agent"]
-        BlockMal["block-malicious.ps1<br/>(AR)"]
-        DFIR["Invoke-DFIR<br/>Collection.ps1 (AR)"]
+        ActionScript["action-script.bat<br/>(AR entry)"]
+        BlockMal["block-malicious.ps1<br/>(kill+delete+block)"]
+        DFIR["Invoke-DFIR<br/>Collection.ps1"]
         SsjmukTask["ssjmuk-task.ps1<br/>(Task Scheduler)"]
         Sysmon --> WazuhAgentW
+        ActionScript --> BlockMal
+        BlockMal --> DFIR
     end
     class WC agent
 
@@ -74,9 +78,9 @@ flowchart LR
     MISP -- "webhook /misp-update" --> WebhookM
     MISP -- "webhook /misp-update" --> WebhookK
 
-    WazuhAgentK -- "syslog tcp:1514" --> Rules
-    WazuhAgentL -- "syslog tcp:1514" --> Rules
-    WazuhAgentW -- "syslog tcp:1514" --> Rules
+    WazuhAgentK -- "tcp:1514" --> Rules
+    WazuhAgentL -- "tcp:1514" --> Rules
+    WazuhAgentW -- "tcp:1514" --> Rules
 
     ARDispatch -- "JSON over agent channel" --> WazuhAgentK
     ARDispatch -- "JSON over agent channel" --> WazuhAgentL
@@ -84,8 +88,7 @@ flowchart LR
 
     WazuhAgentK -- "exec" --> KongPlugin
     WazuhAgentK -- "exec firewall-drop" --> FW
-    WazuhAgentW -- "exec" --> BlockMal
-    WazuhAgentW -- "exec" --> DFIR
+    WazuhAgentW -- "exec" --> ActionScript
 
     DailyReport -- "API call" --> Gemini
     Gemini -- "Thai analysis" --> DailyReport
@@ -93,6 +96,8 @@ flowchart LR
 
     GitHub -.->|"pull configs"| SsjmukTask
     SsjmukTask -.->|"update Sysmon + scripts"| Sysmon
+
+    linkStyle default stroke:#444444,stroke-width:2px
 ```
 
 ---
@@ -187,84 +192,75 @@ sequenceDiagram
 
 ## 4. Active Response Matrix (rule → AR → effect)
 
+> AR mapping ตรงกับ `<active-response>` blocks ใน wazuh-manager's ossec.conf:
+> - **firewalld-drop** + **kong-block** ใช้ rules_id เดียวกัน (Linux/Kong rules)
+> - **action-script** ใช้คนละชุด — เฉพาะ 110002-110046 (Windows Sysmon MISP IoC matches)
+> - 92xxx (92213/92211/92400/92309) **ไม่มี AR** — alert-only, อยู่ใน daily report เพื่อ manual investigation
+
 ```mermaid
-flowchart LR
-    classDef misp fill:#fbe5cd,stroke:#783f04
-    classDef behav fill:#cfe2f3,stroke:#1c4587
-    classDef win fill:#d9ead3,stroke:#274e13
-    classDef ar fill:#fff2cc,stroke:#7f6000
-    classDef effect fill:#f4cccc,stroke:#660000
+%%{init: {'theme':'base', 'themeVariables': {'lineColor':'#2c2c2c'}}}%%
+flowchart TD
+    classDef misp fill:#fbe5cd,stroke:#783f04,stroke-width:2px,color:#1a1a1a
+    classDef behav fill:#cfe2f3,stroke:#1c4587,stroke-width:2px,color:#1a1a1a
+    classDef win fill:#d9ead3,stroke:#274e13,stroke-width:2px,color:#1a1a1a
+    classDef alertonly fill:#f9f3d9,stroke:#806600,stroke-width:2px,color:#5a5000
+    classDef ar fill:#fff2cc,stroke:#7f6000,stroke-width:2px,color:#1a1a1a
+    classDef effect fill:#f4cccc,stroke:#660000,stroke-width:2px,color:#1a1a1a
 
-    subgraph MispRules["MISP CDB rules (ip-src/ip-dst match)"]
-        R203["100203<br/>web 400+CDB"]
-        R204["100204<br/>200 OK+CDB"]
-        R205["100205<br/>web 500+CDB"]
-        R206["100206<br/>access log+CDB"]
+    subgraph LinuxKong["🐧 Linux + Kong-gateway rules (AR: firewalld-drop + kong-block)"]
+        direction TB
+        subgraph MispRules["MISP CDB rules (srcip ∈ blacklist-ip)"]
+            R203_206["100203 / 100204 / 100205 / 100206<br/>web 400 / 200 / 500 / accesslog + CDB match"]:::misp
+        end
+        subgraph BehavRules["Behavior rules"]
+            R_web["31121 / 31151-53 / 31516<br/>web scan / SQLi probe / brute"]:::behav
+            R_ssh["5712 / 5720<br/>SSH brute force"]:::behav
+            R_cmd["92033<br/>suspicious cmd.exe"]:::behav
+            R_custom["100201 / 100202<br/>OPTIONS abuse / headless UA"]:::behav
+        end
     end
-    class R203,R204,R205,R206 misp
 
-    subgraph BehavRules["Behavior rules"]
-        R31121["31121<br/>scan probe"]
-        R31151["31151,31152,31153<br/>multi-400 SQLi"]
-        R31516["31516<br/>web brute"]
-        R5712["5712,5720<br/>SSH brute force"]
-        R92033["92033<br/>suspicious cmd.exe"]
-        R100201["100201<br/>OPTIONS abuse"]
-        R100202["100202<br/>headless UA"]
+    subgraph WinSysmon["🪟 Windows Sysmon rules"]
+        direction TB
+        R110xxx["110002-110046<br/>MISP IoC sysmon match<br/>(sha256 / domain / ip-dst)<br/><b>→ AR: action-script</b>"]:::win
+        R92xxx["92213 / 92211 / 92400 / 92309<br/>EXE drop / rundll32 / code inject / COM hijack<br/><i>alert-only — no AR</i>"]:::alertonly
     end
-    class R31121,R31151,R31516,R5712,R92033,R100201,R100202 behav
 
-    subgraph WinRules["Windows Sysmon rules"]
-        R110002["110002-110046<br/>MISP IoC sysmon match<br/>(sha256/domain/ip-dst)"]
-        R92213["92213<br/>EXE in malware folder"]
-        R92211["92211<br/>rundll32 dropper"]
-        R92400["92400<br/>code injection explorer"]
-        R92309["92309<br/>COM hijack"]
-    end
-    class R110002,R92213,R92211,R92400,R92309 win
-
-    FwDrop["firewalld-drop<br/>(L3 packet drop)"]:::ar
+    FwDrop["firewalld-drop<br/>(Wazuh built-in)"]:::ar
     KongBlock["kong-block.py<br/>→ kongblock.sh"]:::ar
-    BlockMal["block-malicious.ps1<br/>(kill+delete+block)"]:::ar
+    ActScript["action-script.bat<br/>(Windows AR entry)"]:::ar
+    BlockMal["block-malicious.ps1"]:::ar
     DFIRColl["Invoke-DFIR<br/>Collection.ps1"]:::ar
-    ActScript["action-script.bat"]:::ar
 
-    R203 --> FwDrop
-    R203 --> KongBlock
-    R204 --> FwDrop
-    R204 --> KongBlock
-    R205 --> FwDrop
-    R205 --> KongBlock
-    R206 --> FwDrop
-    R206 --> KongBlock
+    EffFW["✋ TCP RST<br/>(L3 network drop)"]:::effect
+    EffKong["🚫 HTTP 403<br/>(L7 API gateway)"]:::effect
+    EffWin["☠️ kill process<br/>delete EXE<br/>block firewall"]:::effect
+    EffDFIR["📦 collect artifacts<br/>(dfir-found/)"]:::effect
+    EffAlert["📊 daily report only<br/>(manual investigation)"]:::effect
 
-    R31121 --> FwDrop
-    R31121 --> KongBlock
-    R31151 --> FwDrop
-    R31151 --> KongBlock
-    R31516 --> FwDrop
-    R31516 --> KongBlock
-    R5712 --> FwDrop
-    R5712 --> KongBlock
-    R92033 --> FwDrop
-    R92033 --> KongBlock
-    R100201 --> FwDrop
-    R100201 --> KongBlock
-    R100202 --> FwDrop
-    R100202 --> KongBlock
+    R203_206 --> FwDrop
+    R203_206 --> KongBlock
+    R_web --> FwDrop
+    R_web --> KongBlock
+    R_ssh --> FwDrop
+    R_ssh --> KongBlock
+    R_cmd --> FwDrop
+    R_cmd --> KongBlock
+    R_custom --> FwDrop
+    R_custom --> KongBlock
 
-    R110002 --> ActScript
-    R92213 --> BlockMal
-    R92213 --> DFIRColl
-    R92211 --> BlockMal
-    R92211 --> DFIRColl
-    R92400 --> BlockMal
-    R92309 --> BlockMal
+    R110xxx --> ActScript
+    ActScript --> BlockMal
+    BlockMal --> DFIRColl
 
-    FwDrop --> EffFW["✋ TCP RST<br/>(network layer)"]:::effect
-    KongBlock --> EffKong["🚫 HTTP 403<br/>(API gateway)"]:::effect
-    BlockMal --> EffWin["☠️ kill process<br/>delete EXE<br/>block firewall"]:::effect
-    DFIRColl --> EffDFIR["📦 collect artifacts<br/>→ /install-sysmon/<br/>dfir-found/"]:::effect
+    R92xxx -.-> EffAlert
+
+    FwDrop --> EffFW
+    KongBlock --> EffKong
+    BlockMal --> EffWin
+    DFIRColl --> EffDFIR
+
+    linkStyle default stroke:#444444,stroke-width:1.5px
 ```
 
 ---
@@ -272,11 +268,12 @@ flowchart LR
 ## 5. Daily Report Pipeline (AI-Assisted Triage)
 
 ```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'lineColor':'#2c2c2c'}}}%%
 flowchart TD
-    classDef src fill:#cfe2f3,stroke:#1c4587
-    classDef proc fill:#fff2cc,stroke:#7f6000
-    classDef ai fill:#ead1dc,stroke:#660066
-    classDef out fill:#d9d2e9,stroke:#20124d
+    classDef src fill:#cfe2f3,stroke:#1c4587,stroke-width:2px,color:#1a1a1a
+    classDef proc fill:#fff2cc,stroke:#7f6000,stroke-width:2px,color:#1a1a1a
+    classDef ai fill:#ead1dc,stroke:#660066,stroke-width:2px,color:#1a1a1a
+    classDef out fill:#d9d2e9,stroke:#20124d,stroke-width:2px,color:#1a1a1a
 
     Archives[("/var/ossec/logs/<br/>archives/*.json.gz<br/>(ทุก alert 24h)")]:::src
     SocCtx["soc_context.md<br/>(known FP patterns,<br/>internal apps, etc.)"]:::src
@@ -312,6 +309,8 @@ flowchart TD
 
     RawCSV -.->|"local dev<br/>(SOC analyst)"| SplitCSV
     SplitCSV -.-> PerRule[("by_rule/*.csv<br/>+ _INDEX_*.csv")]:::out
+
+    linkStyle default stroke:#444444,stroke-width:2px
 ```
 
 ---
@@ -346,20 +345,15 @@ sequenceDiagram
 
 ---
 
-## 📂 Source Tree Reference (สำคัญ)
+## 📂 Repo Layout (public only)
 
 ```
-C:\install-sysmon\                              ← repo root
-├── .claude/                                     ← project docs (gitignored)
-│   ├── project_instructions.md
-│   ├── investigation_playbook.md
-│   ├── suppression_methodology.md               ← 3-tier upstream-first
-│   └── ...
-├── sysmonconfig-export-v2.xml                   ← Sysmon config (2895 lines)
+nawin2535/MISP (GitHub)
+├── sysmonconfig-export-v2.xml                   ← Sysmon config (~2900 lines)
 ├── ssjmuk-task.ps1                              ← Task Scheduler entry
 ├── update-sysmon-config.ps1                     ← Sysmon installer
 ├── block-office.ps1                             ← Office macro restriction
-├── Invoke-DFIRCollection.ps1                    ← DFIR AR
+├── Invoke-DFIRCollection.ps1                    ← DFIR AR (called via action-script chain)
 ├── wazuh/
 │   ├── active-response/bin/
 │   │   └── block-malicious.ps1                  ← Windows AR (kill+delete+block)
@@ -387,16 +381,6 @@ C:\install-sysmon\                              ← repo root
 │   ├── wazuh/active-response__bin/
 │   │   └── kong-block.py.example                ← AR classifier (MISP vs behavior)
 │   └── pipeline.md                              ← end-to-end flow reference
-├── wazuh-export-log/wazuh_daily_report_v3_update13may2569/
-│   ├── daily_wazuh_report_free.py               ← daily AI report (cron 12:50)
-│   ├── wazuh_ai.py                              ← Gemini API wrapper
-│   ├── wazuh_config.py                          ← env + fallback chain
-│   ├── wazuh_prompt.py                          ← prompt template
-│   ├── soc_context.md                           ← known FP knowledge base
-│   ├── local_rules.xml                          ← Wazuh custom rules
-│   └── tools/
-│       ├── list_gemini_models.py                ← Gemini model probe
-│       └── split_wazuh_csv.py                   ← per-rule CSV splitter
 └── diagram-project/
     └── architecture.md                          ← THIS FILE
 ```
@@ -415,12 +399,10 @@ C:\install-sysmon\                              ← repo root
 | **Tier 1 Sysmon exclude** ก่อน Tier 3 local_rules suppression | กรองที่ต้นน้ำ = ไม่กิน queue/storage. Tier 3 = last resort |
 | **Daily AI report (Gemini 3.5 Flash)** | Free tier + 1M context + Thai output + จับ pattern attack ระดับ network-wide (SSH brute force from internal IP ที่ rule-based ไม่ catch) |
 | **3-tier hierarchy** (Sysmon → agent.conf → local_rules) | Methodology หลีกเลี่ยง blind spot จาก downstream suppression |
+| **Single-chain Windows AR** (action-script → block-malicious → DFIR) | One entry point จาก Wazuh → guaranteed ordering: detect→kill→collect evidence — ไม่ race condition กับ multiple parallel ARs |
 
 ---
 
 ## 🔗 Related Documentation
 
-- [pipeline.md](../kong-gateway/pipeline.md) — Kong-side detailed flow + file inventory
-- [.claude/suppression_methodology.md](../.claude/suppression_methodology.md) — 3-tier upstream-first methodology
-- [.claude/investigation_playbook.md](../.claude/investigation_playbook.md) — daily analyst workflow
-- [wazuh-export-log/.../soc_context.md](../wazuh-export-log/wazuh_daily_report_v3_update13may2569/soc_context.md) — known FP patterns
+- [kong-gateway/pipeline.md](../kong-gateway/pipeline.md) — Kong-side detailed flow + file inventory

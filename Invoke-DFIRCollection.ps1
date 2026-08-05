@@ -334,7 +334,139 @@ if ($EventType -eq "Event22") {
     } catch {}
 }
 
-# ---- 10. Summary ----
+# ---- 11. Masquerade & sibling hunt (anchored on alert path) [Gap1] ----
+# เดิม path-allowlist ถือ System32 = ปลอดภัย -> malware ใน System32\Microsoft ล่องหน
+# วิธีใหม่: ยึด anchor = ไฟล์จาก alert, sweep พี่น้องใน dir เดียวกัน (เฉพาะ dir ที่ไม่ใช่ system root),
+#   flag ด้วยหลายสัญญาณรวม (nonstd sysdir + hidden + unsigned + timestomp) แล้วเก็บ SD/ACL
+try {
+    $knownSub = @('drivers','wbem','windowspowershell','spool','config','catroot','catroot2','tasks',
+        'logfiles','sru','ras','en-us','th-th','codeintegrity','grouppolicy','winevt','dism','oobe',
+        'speech','speech_onecore','wfp','migration','applocker','driverstore','com','wdi')
+    $stdRoots = @('c:\windows\system32','c:\windows\syswow64','c:\windows','c:\windows\winsxs','c:\program files\windowsapps')
+    $anchors = @($TargetFile,$ProcessImage) |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) -and (-not $_.ToLower().StartsWith($dfirRoot.ToLower())) } |
+        Select-Object -Unique
+    $masq = @(); $seen = @{}
+    foreach ($a in $anchors) {
+        $dir = Split-Path -LiteralPath $a -Parent
+        $dl  = $dir.ToLower().TrimEnd('\')
+        # sibling sweep เฉพาะ dir ที่ไม่ใช่ system root ใหญ่ (กัน enumerate System32 ทั้งก้อน)
+        $files = if ($stdRoots -contains $dl) { @(Get-Item -LiteralPath $a -Force -ErrorAction SilentlyContinue) }
+                 else { @(Get-ChildItem -LiteralPath $dir -Force -File -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Extension -match '(?i)\.(exe|dll|sys|scr)$' } | Select-Object -First 60) }
+        foreach ($fi in $files) {
+            if (-not $fi) { continue }
+            if ($seen.ContainsKey($fi.FullName.ToLower())) { continue }
+            $seen[$fi.FullName.ToLower()] = $true
+            $reasons = @()
+            if ($fi.FullName -match '(?i)\\System32\\([^\\]+)\\' -or $fi.FullName -match '(?i)\\SysWOW64\\([^\\]+)\\') {
+                if ($knownSub -notcontains $matches[1].ToLower()) { $reasons += ("nonstd_sysdir:" + $matches[1]) }
+            }
+            if (([int]$fi.Attributes -band [int][IO.FileAttributes]::Hidden) -ne 0) { $reasons += 'hidden' }
+            if ($fi.CreationTimeUtc -eq $fi.LastWriteTimeUtc) { $reasons += 'timestomp_ctime_eq_mtime' }
+            $isAnchor = ($fi.FullName -ieq $a)
+            $sig = 'Skipped'
+            if ($reasons.Count -gt 0 -or $isAnchor) {
+                try { $sig = (Get-AuthenticodeSignature $fi.FullName -ErrorAction Stop).Status } catch { $sig = 'Error' }
+                if ($sig -ne 'Valid') { $reasons += ("sig:" + $sig) }
+            }
+            if ($reasons.Count -gt 0) {
+                $svcSd = ''
+                $svcRef = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
+                    Where-Object { $_.PathName -like ("*" + $fi.Name + "*") } | Select-Object -First 1
+                if ($svcRef) { $svcSd = "svc=$($svcRef.Name) sddl=" + (((& sc.exe sdshow $svcRef.Name) 2>$null) -join '') }
+                $masq += [ordered]@{
+                    path         = $fi.FullName
+                    is_anchor    = $isAnchor
+                    sha256       = (Get-FileHash $fi.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+                    size_bytes   = $fi.Length
+                    hidden       = (([int]$fi.Attributes -band [int][IO.FileAttributes]::Hidden) -ne 0)
+                    created_utc  = $fi.CreationTimeUtc.ToString('o')
+                    modified_utc = $fi.LastWriteTimeUtc.ToString('o')
+                    signature    = $sig
+                    owner        = (Get-Acl $fi.FullName -ErrorAction SilentlyContinue).Owner
+                    acl          = ((& icacls.exe "$($fi.FullName)" 2>$null | Where-Object { $_ -match ':' } | Select-Object -First 10) -join ' | ')
+                    service_ref  = $svcSd
+                    flags        = $reasons
+                }
+            }
+        }
+    }
+    if ($masq.Count -gt 0) {
+        @{masquerade_findings = $masq} | ConvertTo-Json -Depth 6 |
+            Out-File (Join-Path $dfirDir "masquerade_hunt.json") -Encoding utf8
+        $artifacts += "masquerade_hunt.json"
+        Log-Detail "Saved masquerade_hunt.json ($($masq.Count) flagged binaries)"
+    } else { Log-Detail "masquerade_hunt: nothing flagged" }
+} catch { Log-Detail "masquerade_hunt failed: $($_.Exception.Message)" }
+
+# ---- 12. Sysmon detailed events (per-EID EventData) [Gap2] ----
+# เดิมเก็บแค่ metadata (โยน CommandLine/Parent ทิ้ง) -> watchdog หาไม่เจอจาก output
+# ใหม่: ดึง EventData เต็มต่อ EID (1 proc, 6 driver=BYOVD, 7 imgload, 11 filecreate, 13 reg, 22/23)
+try {
+    $sinceS = (Get-Date).AddMinutes(-60)
+    $symJob = Start-Job -ScriptBlock {
+        param($since, $dfirDir)
+        $wanted = 1,3,6,7,11,13,22,23
+        $out = [ordered]@{}
+        foreach ($eid in $wanted) {
+            try {
+                $evs = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Sysmon/Operational'; Id=$eid; StartTime=$since} `
+                    -MaxEvents 150 -ErrorAction SilentlyContinue
+                $out["EID$eid"] = @($evs | ForEach-Object {
+                    $x = [xml]$_.ToXml()
+                    $d = [ordered]@{ TimeCreated = $_.TimeCreated.ToString('o') }
+                    $x.Event.EventData.Data | ForEach-Object { if ($_.Name) { $d[$_.Name] = $_.'#text' } }
+                    $d
+                })
+            } catch { $out["EID$eid"] = @() }
+        }
+        $out | ConvertTo-Json -Depth 5 | Out-File (Join-Path $dfirDir "sysmon_events_detailed.json") -Encoding utf8
+        return ($out.Keys | ForEach-Object { "$_=$($out[$_].Count)" })
+    } -ArgumentList $sinceS, $dfirDir
+    $c = Wait-Job $symJob -Timeout 90
+    if ($c) { $r = Receive-Job $symJob; $artifacts += "sysmon_events_detailed.json"; Log-Detail "Saved sysmon_events_detailed.json ($($r -join ' '))" }
+    else { Stop-Job $symJob -ErrorAction SilentlyContinue; Log-Detail "sysmon_events_detailed.json TIMEOUT (>90s)" }
+    Remove-Job $symJob -Force -ErrorAction SilentlyContinue
+} catch { Log-Detail "sysmon_events_detailed.json failed: $($_.Exception.Message)" }
+
+# ---- 13. Persistence breadth (services / tasks / WMI) [Gap3] ----
+# เดิมเก็บแค่ Run/RunOnce -> พลาด service ปลอม (persistence จริงเคสนี้), tasks, WMI
+try {
+    $persJob = Start-Job -ScriptBlock {
+        param($dfirDir)
+        $p = [ordered]@{}
+        $svc = @()
+        Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object {
+            $ip = $_.PathName; if (-not $ip) { return }
+            $susp = ($ip -match '(?i)\\(Temp|AppData|Users\\Public|ProgramData)\\') -or
+                    ($ip -match '(?i)System32\\(?!drivers|wbem|windowspowershell)[A-Za-z0-9]+\\') -or
+                    ($ip -match '(?i)WinRing0|GoogleUpdate\.exe')
+            if ($susp) {
+                $sd = (& sc.exe sdshow $_.Name 2>$null) -join ''
+                $svc += @{ name=$_.Name; state=$_.State; start=$_.StartMode; account=$_.StartName; imagepath=$ip; sddl=$sd }
+            }
+        }
+        $p['suspicious_services'] = $svc
+        try {
+            $p['suspicious_tasks'] = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+                ($_.Actions.Execute -join ';') -match '(?i)\\(Temp|AppData|Users\\Public|ProgramData)\\|System32\\(?!drivers|wbem)[A-Za-z0-9]+\\.*\.(exe|ps1|bat|vbs|scr)'
+            } | ForEach-Object { @{ name=$_.TaskName; path=$_.TaskPath; exec=($_.Actions.Execute -join ';'); args=($_.Actions.Arguments -join ';') } })
+        } catch { $p['suspicious_tasks'] = @() }
+        try { $p['wmi_consumers'] = @(Get-CimInstance -Namespace root\subscription -Class __EventConsumer -ErrorAction SilentlyContinue |
+                Select-Object Name, __CLASS, @{N='cmd';E={$_.CommandLineTemplate}}, @{N='script';E={$_.ScriptText}}) } catch { $p['wmi_consumers'] = @() }
+        try { $p['wmi_bindings'] = @(Get-CimInstance -Namespace root\subscription -Class __FilterToConsumerBinding -ErrorAction SilentlyContinue |
+                Select-Object @{N='Filter';E={"$($_.Filter)"}}, @{N='Consumer';E={"$($_.Consumer)"}}) } catch { $p['wmi_bindings'] = @() }
+        $p | ConvertTo-Json -Depth 6 | Out-File (Join-Path $dfirDir "persistence_extended.json") -Encoding utf8
+        return "svc=$($svc.Count) tasks=$($p['suspicious_tasks'].Count) wmi=$($p['wmi_consumers'].Count)"
+    } -ArgumentList $dfirDir
+    $c = Wait-Job $persJob -Timeout 60
+    if ($c) { $r = Receive-Job $persJob; $artifacts += "persistence_extended.json"; Log-Detail "Saved persistence_extended.json ($r)" }
+    else { Stop-Job $persJob -ErrorAction SilentlyContinue; Log-Detail "persistence_extended.json TIMEOUT (>60s)" }
+    Remove-Job $persJob -Force -ErrorAction SilentlyContinue
+} catch { Log-Detail "persistence_extended.json failed: $($_.Exception.Message)" }
+
+# ---- 14. Summary ----
 try {
     @{
         dfir_timestamp = (Get-Date -Format 'o')

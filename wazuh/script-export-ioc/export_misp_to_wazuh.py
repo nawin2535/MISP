@@ -23,7 +23,7 @@ MAX_RETRIES = 3
 
 # Attribute types that should be time-filtered with --days.
 # Other types (sha256, domain, hostname, ...) are exported in full regardless of age.
-TIME_FILTERED_TYPES = {"ip-src", "ip-dst"}
+TIME_FILTERED_TYPES = {"ip-src", "ip-dst", "ip-src|port", "ip-dst|port"}
 
 # MISP REST parameter used for --days. We use attribute_timestamp (NOT
 # publish_timestamp) because publish_timestamp filters on when the parent
@@ -34,26 +34,31 @@ TIME_FILTER_PARAM = "attribute_timestamp"
 
 
 def _age_filter_value(type_attribute, days: int):
-    """Return '<days>d' if this type should be time-filtered, else None.
-    Accepts string or list type_attribute (domain is passed as ['domain','hostname'])."""
+    """Return '<days>d' if any type should be time-filtered, else None.
+    Accepts string or list type_attribute (e.g. ['ip-dst','ip-dst|port'])."""
     if days <= 0:
         return None
-    if isinstance(type_attribute, str) and type_attribute in TIME_FILTERED_TYPES:
+    types = [type_attribute] if isinstance(type_attribute, str) else list(type_attribute)
+    if any(t in TIME_FILTERED_TYPES for t in types):
         return f"{days}d"
     return None
 
 def format_wazuh_entry(attr: Dict) -> Optional[str]:
-    """Formats a MISP attribute into a Wazuh CDB compatible string, properly quoting colons."""
+    """Formats a MISP attribute into a Wazuh CDB compatible string, properly quoting colons.
+    Composite ip-*|port types stored as 'IP|PORT' — strip port so Wazuh matches by IP only."""
     value = attr.get("value")
     event_id = attr.get("event_id")
-    
-    if value:
-        # Wazuh CDB format: key:value
-        # If the value contains a colon (IPv6, MAC address, etc.), quote it.
-        if ":" in value:
-            return f'"{value}":Event_{event_id}'
-        return f"{value}:Event_{event_id}"
-    return None
+    attr_type = attr.get("type", "")
+
+    if not value:
+        return None
+
+    if attr_type in ("ip-dst|port", "ip-src|port") and "|" in value:
+        value = value.split("|", 1)[0]
+
+    if ":" in value:
+        return f'"{value}":Event_{event_id}'
+    return f"{value}:Event_{event_id}"
 
 def fetch_page_attributes(misp_instance: PyMISP, page: int, limit: int, type_attribute,
                           age_filter: Optional[str] = None) -> Optional[List[Dict]]:
@@ -180,8 +185,8 @@ def main():
     if args.output_file == "all":
         # Predefined mapping: output_file -> type_attribute
         tasks = [
-            ("misp_ip-src", "ip-src"),
-            ("misp_ip-dst", "ip-dst"),
+            ("misp_ip-src", ["ip-src", "ip-src|port"]),
+            ("misp_ip-dst", ["ip-dst", "ip-dst|port"]),
             ("misp_sha256", "sha256"),
             ("misp_domain", ["domain", "hostname"])
         ]

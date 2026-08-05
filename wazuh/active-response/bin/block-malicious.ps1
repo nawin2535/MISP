@@ -1,12 +1,7 @@
 ################################
-## Wazuh Active Response (FINAL)
-## Supports: MISP + Sysmon + FIM
-## Sysmon Events: 1, 3, 6, 7, 15, 22, 26, 29
-## DFIR Collection: C:\install-sysmon\dfir-found\ (background job)
-##
-## Architecture:
-##   Main script  -> IOC extract -> kill/delete -> return (~2 sec)
-##   Invoke-DFIRCollection.ps1 -> background job แยก ไม่ block main
+## Wazuh Active Response (FINAL) - MISP + Sysmon(1,3,6,7,15,22,26,29) + FIM
+## Watchdog-aware containment (signature-gated) + DFIR collection (background job)
+## v36 5aug2569: Authenticode gate + BYOVD carve-out + takeown/sdset + Confirm-IocFile
 ################################
 
 $logFile    = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
@@ -57,6 +52,311 @@ function Start-DFIRBackground {
         Log-Detail "DFIR: Background started (EventType=$EventType IOC=$IOCValue)"
     } catch {
         Log-Detail "DFIR: Launch failed: $($_.Exception.Message)"
+    }
+}
+
+# System roots used only for the fail-closed branch below (when a file's signature
+# cannot be read, refuse it if it sits in a system root).
+$protectedSystemPaths = @(
+    "C:\Windows\System32\",
+    "C:\Windows\SysWOW64\",
+    "C:\Windows\WinSxS\",
+    "C:\Windows\assembly\",
+    "C:\Windows\Microsoft.NET\",
+    "C:\Program Files\Windows Defender\",
+    "C:\Program Files (x86)\ossec-agent\"
+)
+
+# Should we REFUSE to delete this file? $true = protect. Decide by Authenticode:
+# validly signed -> protect (a contaminated feed can't make us delete a real OS
+# binary; also shields signed apps from FP removal). Unsigned/tampered -> allow
+# (the 4-Aug masquerade fakes). BYOVD CARVE-OUT: a signed *.sys OUTSIDE the driver
+# store is a bring-your-own-vulnerable-driver (WinRing0x64.sys = incident trigger,
+# validly signed) -> removable. Fail closed (throw/absent) only inside a system root.
+function Test-ProtectedSystemFile {
+    param([string]$path)
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $lp = $path.ToLower()
+    try {
+        if (-not (Test-Path -LiteralPath $path)) {
+            foreach ($_pp in $protectedSystemPaths) { if ($lp.StartsWith($_pp.ToLower())) { return $true } }
+            return $false
+        }
+        $sig = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
+        if ($sig.Status -eq 'Valid') {
+            if ([System.IO.Path]::GetExtension($lp) -eq '.sys' -and -not ($lp.Contains('\system32\drivers\') -or $lp.Contains('\system32\driverstore\'))) {
+                Log-Detail "NOT protected: validly-signed .sys outside driver store (BYOVD) $path - allowing removal"
+                return $false
+            }
+            Log-Detail "PROTECTED: validly signed $path - refusing"
+            return $true
+        }
+        Log-Detail "NOT protected: $path signature=$($sig.Status) - masquerade candidate, allowing"
+        return $false
+    } catch {
+        foreach ($_pp in $protectedSystemPaths) { if ($lp.StartsWith($_pp.ToLower())) { Log-Detail "PROTECTED (fail-closed): signature check threw for $path"; return $true } }
+        Log-Detail "NOT protected: signature check threw for $path (non-system path) - allowing"
+        return $false
+    }
+}
+
+# Hard file deletion for ACL-hardened malware (4-Aug miner hardened NTFS ACLs so
+# Remove-Item returned Access denied even elevated). Order matters: clearing
+# attributes and even icacls can be denied before ownership is taken, so
+# takeown -> icacls /reset -> grant Administrators -> clear attributes -> retry.
+# Ladder ends at delete-on-reboot. Refuses protected signed system files (also
+# guards files reached via hash-locate that never passed the top-level guard).
+# Returns $true if the file is gone (or scheduled for reboot deletion).
+function Remove-FileHard {
+    param([string]$path)
+    $script:RemoveFileRebootScheduled = $false
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    if (-not (Test-Path -LiteralPath $path)) { return $true }
+    if (Test-ProtectedSystemFile $path) { Log-Detail "Remove-FileHard REFUSED (protected): $path"; return $false }
+
+    try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch {}
+    if (-not (Test-Path -LiteralPath $path)) { Log-Detail "Deleted (plain): $path"; return $true }
+
+    Log-Detail "Delete denied, escalating takeown+icacls: $path"
+    & takeown.exe /F "$path" /A > $null 2>&1
+    & icacls.exe "$path" /reset > $null 2>&1
+    & icacls.exe "$path" /grant "*S-1-5-32-544:F" > $null 2>&1
+    try { (Get-Item -LiteralPath $path -Force).Attributes = 'Normal' } catch {}
+    try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { Log-Detail "Delete failed after ACL reset: $($_.Exception.Message)" }
+    if (-not (Test-Path -LiteralPath $path)) { Log-Detail "Deleted (after takeown/icacls): $path"; return $true }
+
+    & cmd.exe /c "del /f /q `"$path`"" > $null 2>&1
+    if (-not (Test-Path -LiteralPath $path)) { Log-Detail "Deleted (cmd del): $path"; return $true }
+
+    try {
+        if (-not ('FHmv' -as [type])) {
+            Add-Type -TypeDefinition "using System;using System.Runtime.InteropServices;public class FHmv{[DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)]public static extern bool MoveFileEx(string a,string b,int f);public const int D=4;}" -ErrorAction SilentlyContinue
+        }
+        if ([FHmv]::MoveFileEx($path,$null,[FHmv]::D)) { $script:RemoveFileRebootScheduled = $true; Log-Detail "Scheduled delete-on-reboot: $path"; return $true }
+        Log-Detail "MoveFileEx failed: $path"
+    } catch { Log-Detail "MoveFileEx error: $($_.Exception.Message)" }
+    return $false
+}
+
+# Hard service/driver removal for SD-hardened malware services (the 4-Aug miner
+# hardened its service SD so 'sc delete' returned Access denied 5). Reset the SD
+# to default, stop, delete; fall back to taking ownership of the registry key;
+# last resort disable (Start=4). Returns $true if the service is gone/disabled.
+function Remove-ServiceHard {
+    param([string]$svc)
+    if ([string]::IsNullOrWhiteSpace($svc)) { return $false }
+    if (-not (Get-Service -Name $svc -ErrorAction SilentlyContinue)) { return $true }
+    $defSD = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)'
+    Log-Detail "Remove-ServiceHard: $svc (SDDL before=$((& sc.exe sdshow $svc) -join ''))"
+    & sc.exe sdset $svc $defSD | Out-Null
+    & sc.exe stop   $svc | Out-Null
+    & sc.exe delete $svc | Out-Null
+    Start-Sleep -Milliseconds 400
+    if (-not (Get-Service -Name $svc -ErrorAction SilentlyContinue)) { Log-Detail "Service deleted: $svc"; return $true }
+
+    Log-Detail "sc delete failed, escalating registry takeover: $svc"
+    $rel = "SYSTEM\CurrentControlSet\Services\$svc"
+    & reg.exe delete "HKLM\$rel" /f > $null 2>&1
+    if (-not (Test-Path "HKLM:\$rel")) { Log-Detail "Service key removed (reg delete): $svc"; return $true }
+    try {
+        $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+        $k  = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($rel,[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,[System.Security.AccessControl.RegistryRights]::TakeOwnership)
+        $a  = $k.GetAccessControl([System.Security.AccessControl.AccessControlSections]::None); $a.SetOwner($admins); $k.SetAccessControl($a)
+        $a2 = $k.GetAccessControl(); $a2.SetAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule($admins,'FullControl','ContainerInherit','None','Allow'))); $k.SetAccessControl($a2)
+        $k.Close()
+        Remove-Item -Path "HKLM:\$rel" -Recurse -Force -ErrorAction SilentlyContinue
+    } catch { Log-Detail "Service key takeover error: $($_.Exception.Message)" }
+    if (-not (Test-Path "HKLM:\$rel")) { Log-Detail "Service key removed (takeown): $svc"; return $true }
+
+    try { Set-ItemProperty "HKLM:\$rel" -Name Start -Value 4 -ErrorAction Stop; Log-Detail "Service disabled (Start=4, delete failed): $svc"; return $true }
+    catch { Log-Detail "Service disable failed: $($_.Exception.Message)"; return $false }
+}
+
+# A directory too broad to sweep: the drive root or a shared OS/app root. $dir is
+# attacker-controlled (parent of the alerted file), so malware dropped directly in
+# System32 / Program Files / a drive root would otherwise scope the process-kill and
+# service-sweep across the whole OS. In those dirs we act on the single file only.
+function Test-BroadSystemDir {
+    param([string]$dir)
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $true }
+    $d  = $dir.ToLower().TrimEnd('\')
+    $sr = $env:SystemRoot.ToLower().TrimEnd('\')
+    $sd = $env:SystemDrive.ToLower().TrimEnd('\')
+    $broad = @($sd, $sr, "$sr\system32", "$sr\system32\drivers", "$sr\system32\driverstore", "$sr\syswow64",
+        "${env:ProgramFiles}".ToLower().TrimEnd('\'), "${env:ProgramFiles(x86)}".ToLower().TrimEnd('\'), "$env:ProgramData".ToLower().TrimEnd('\'))
+    return ($broad -contains $d)
+}
+
+# Resolve a service ImagePath to its executable path (strip quotes, args, and
+# normalize \??\ , \SystemRoot\ , relative system32\ to absolute). Used to
+# signature-check the binary behind a service before removing the service.
+function Get-ServiceBinary {
+    param([string]$imagePath)
+    if ([string]::IsNullOrWhiteSpace($imagePath)) { return "" }
+    $b = $imagePath.Trim()
+    if ($b.StartsWith('"')) { $b = $b.Substring(1); $q = $b.IndexOf('"'); if ($q -ge 0) { $b = $b.Substring(0,$q) } }
+    else { $m = [regex]::Match($b, '^(.*?\.(?:exe|sys|dll))(?:\s|$)', 'IgnoreCase'); if ($m.Success) { $b = $m.Groups[1].Value } }
+    $bl = $b.ToLower(); $sr = $env:SystemRoot.ToLower()
+    return ($bl -replace '^\\\?\?\\','' -replace '^\\systemroot\\', ($sr + '\') -replace '^system32\\', ($sr + '\system32\'))
+}
+
+# Kill every process whose image lives under $Dir in one pass; return their image
+# paths (the validated delete candidates). SIGNATURE-GATED: a validly-signed OS
+# process is never killed (a mis-scoped $dir must not terminate lsass/svchost).
+function Get-ClusterProcs {
+    param([string]$Dir)
+    $paths = @()
+    if ([string]::IsNullOrWhiteSpace($Dir)) { return $paths }
+    $dl = $Dir.ToLower()
+    try {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($dl) } | ForEach-Object {
+            if (Test-ProtectedSystemFile $_.ExecutablePath) { Log-Detail "Cluster SKIP (signed/protected): PID $($_.ProcessId) $($_.ExecutablePath)"; return }
+            $paths += $_.ExecutablePath
+            try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Log-Detail "Killed cluster PID $($_.ProcessId): $($_.ExecutablePath)" } catch {}
+        }
+    } catch { Log-Detail "Get-ClusterProcs error: $($_.Exception.Message)" }
+    return ($paths | Select-Object -Unique)
+}
+
+# The self-heal survived Normal-mode eradication. Flag for manual Safe Mode; never
+# auto-reboot a clinical endpoint.
+function Write-SafeModeMarker {
+    param([string]$TargetFile,[string]$Dir,[string]$Hash,[string[]]$Services)
+    $marker = "C:\install-sysmon\NEEDS_MANUAL_SAFEMODE.txt"
+    $stamp  = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $body = "[$stamp] CONTAINMENT COULD NOT ERADICATE IN NORMAL MODE - MANUAL SAFE MODE REQUIRED`r`n" +
+            "  Target (keeps re-dropping): $TargetFile`r`n  Malicious dir: $Dir`r`n" +
+            "  IOC sha256: $Hash`r`n  Services neutralized: $($Services -join ', ')`r`n" +
+            "  A self-heal watchdog survived. Boot Safe Mode (Minimal) and run the phase2 remover. Do NOT ignore.`r`n"
+    try { if (-not (Test-Path 'C:\install-sysmon')) { New-Item -ItemType Directory -Path 'C:\install-sysmon' -Force | Out-Null }; Add-Content -LiteralPath $marker -Value $body -Encoding UTF8; Log-Detail "CONTAINMENT: wrote Safe Mode marker $marker" } catch { Log-Detail "Marker write failed: $($_.Exception.Message)" }
+}
+
+# Watchdog-aware containment. Order: neutralize services pointing into the malicious
+# dir (self-heal watchdog is usually a SYSTEM service - kill FIRST) -> kill cluster
+# processes -> hard-delete target + cluster exes -> verify loop. Every op is signature
+# gated and file-specific (never blanket-deletes a dir; protects Protect\ DPAPI and
+# signed files). Per-dir lock stops overlapping runs.
+function Invoke-Containment {
+    param([string]$TargetFile,[string]$ProcessId = "",[string]$Hash = "")
+    if ([string]::IsNullOrWhiteSpace($TargetFile)) { return }
+    $dir = Split-Path -Parent $TargetFile
+    $tmpDir = "C:\install-sysmon\dfir-tmp"
+    try { if (-not (Test-Path $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null } } catch {}
+    $safe = ($dir.ToLower() -replace '[^a-z0-9]','_'); if ($safe.Length -gt 80) { $safe = $safe.Substring($safe.Length-80) }
+    $lock = Join-Path $tmpDir "contain_$safe.lock"
+    if (Test-Path $lock) {
+        $age = (Get-Date) - (Get-Item $lock).LastWriteTime
+        if ($age.TotalSeconds -lt 90) { Log-Detail "CONTAINMENT: already running for $dir (lock $([int]$age.TotalSeconds)s) - skip"; return }
+    }
+    try { Set-Content -LiteralPath $lock -Value (Get-Date -Format o) -Force } catch {}
+
+    try {
+        # $dir is attacker-controlled (parent of the alerted file). If it is a broad
+        # system/app root, dir-scoped process-kill and service-sweep would hit the whole
+        # OS, so restrict to the single alerted file. Narrow (masquerade sub)dirs like
+        # System32\Microsoft still get the full watchdog sweep.
+        $broadDir = Test-BroadSystemDir $dir
+        Log-Detail "CONTAINMENT start: target=$TargetFile dir=$dir broadDir=$broadDir"
+
+        # 1. services whose ImagePath references target/dir. Full-path match only (never
+        # bare filename - masquerade reuses names like SearchIndexer.exe); normalize
+        # relative driver paths first; SIGNATURE-GATED (never remove a signed-binary
+        # service); skipped entirely in a broad dir.
+        $sysroot = $env:SystemRoot.ToLower()
+        $tgtLower = $TargetFile.ToLower(); $dirLower = if ($dir) { $dir.ToLower() } else { "" }
+        $killedSvc = @()
+        if (-not $broadDir) {
+            try {
+                Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Services' -ErrorAction SilentlyContinue | ForEach-Object {
+                    $ip = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ImagePath
+                    if ($ip) {
+                        $ipn = $ip.ToLower().Trim().Trim('"')
+                        $ipn = $ipn -replace '^\\\?\?\\','' -replace '^\\systemroot\\', ($sysroot + '\') -replace '^system32\\', ($sysroot + '\system32\')
+                        if ($ipn.Contains($tgtLower) -or ($dirLower -and $ipn.Contains($dirLower))) {
+                            if (Test-ProtectedSystemFile (Get-ServiceBinary $ip)) { Log-Detail "CONTAINMENT: SKIP service '$($_.PSChildName)' - backed by signed binary ($ip)" }
+                            else {
+                                Log-Detail "CONTAINMENT: service '$($_.PSChildName)' ImagePath=$ip -> Remove-ServiceHard"
+                                if (Remove-ServiceHard $_.PSChildName) { $killedSvc += $_.PSChildName }
+                            }
+                        }
+                    }
+                }
+            } catch { Log-Detail "CONTAINMENT service scan error: $($_.Exception.Message)" }
+        }
+
+        # 2. kill known PID + processes running from the dir (whole dir if narrow;
+        # only the exact target file if broad). Get-ClusterProcs is signature-gated.
+        if ($ProcessId) { try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue; Log-Detail "Killed alert PID $ProcessId" } catch {} }
+        $clusterPaths = @()
+        if ($broadDir) {
+            try { Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLower() -eq $tgtLower } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Log-Detail "Killed target PID $($_.ProcessId)" } catch {} } } catch {}
+        } else {
+            $clusterPaths = Get-ClusterProcs -Dir $dir
+        }
+
+        # 3. delete target + the validated cluster executables
+        Remove-FileHard $TargetFile | Out-Null
+        $rebootPending = $script:RemoveFileRebootScheduled   # loaded driver/DLL: deletes only on reboot
+        foreach ($cp in $clusterPaths) { if ($cp -ne $TargetFile) { Remove-FileHard $cp | Out-Null } }
+
+        # 4. verify loop - a self-heal watchdog re-drops within ~10s. A file that is
+        # merely present-but-scheduled-for-reboot-delete is NOT a re-drop; treat it as
+        # success-pending-reboot, never as a surviving watchdog.
+        $clean = $false
+        for ($i=1; $i -le 3; $i++) {
+            Start-Sleep -Seconds 11
+            if (-not (Test-Path -LiteralPath $TargetFile)) { $clean = $true; Log-Detail "CONTAINMENT: target absent on verify pass $i"; break }
+            if ($rebootPending) { $clean = $true; Log-Detail "CONTAINMENT: target present but delete scheduled on reboot (pass $i) - reboot required"; break }
+            Log-Detail "CONTAINMENT: target RE-DROPPED (pass $i) - watchdog alive, re-neutralizing"
+            if (-not $broadDir) { Get-ClusterProcs -Dir $dir | Out-Null }
+            Remove-FileHard $TargetFile | Out-Null
+            $rebootPending = $script:RemoveFileRebootScheduled
+        }
+
+        if ($clean) {
+            if (Test-Path -LiteralPath $TargetFile) { Log-Detail "CONTAINMENT OK (REBOOT REQUIRED): $TargetFile scheduled for delete-on-reboot; services removed: $($killedSvc -join ',')" }
+            else { Log-Detail "CONTAINMENT SUCCESS: $TargetFile removed; services removed: $($killedSvc -join ',')" }
+        } else {
+            Write-SafeModeMarker -TargetFile $TargetFile -Dir $dir -Hash $Hash -Services $killedSvc
+        }
+    } finally { try { Remove-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue } catch {} }
+}
+
+# Mode B locate: an alert can carry a sha256 IOC but no on-disk path (e.g. Sysmon
+# EID6 driver-load arriving metadata-only). Hunt a bounded set of common malware
+# drop dirs for a file matching the hash. Only executables under 100MB are hashed;
+# scan is depth-limited to stay fast. Returns the path or $null.
+function Find-ByHash {
+    param([string]$Sha256)
+    if ([string]::IsNullOrWhiteSpace($Sha256)) { return $null }
+    $dirs = @("$env:SystemRoot\System32\Microsoft","$env:SystemRoot\Temp","$env:ProgramData","$env:PUBLIC","$env:TEMP","$env:LOCALAPPDATA\Temp") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+    foreach ($d in $dirs) {
+        try {
+            $files = Get-ChildItem -LiteralPath $d -Recurse -File -Force -Depth 3 -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 100MB -and $_.Extension -match '^\.(exe|dll|sys|scr|com)$' }
+            foreach ($fi in $files) {
+                try { if ((Get-FileHash -LiteralPath $fi.FullName -Algorithm SHA256).Hash.ToUpper() -eq $Sha256) { Log-Detail "Find-ByHash: located $($fi.FullName)"; return $fi.FullName } } catch {}
+            }
+        } catch {}
+    }
+    return $null
+}
+
+# Confirm an on-disk file is the IOC. TRUE if SHA256 matches OR the file exists but
+# is unreadable (ACL-hardened malware blocks even elevated Get-FileHash - the 4-Aug
+# anti-forensic move; the IOC came from this path's Sysmon hash so we trust it and let
+# Remove-FileHard's own guard protect system files). FALSE only on definite mismatch
+# or absence.
+function Confirm-IocFile {
+    param([string]$path,[string]$ioc)
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        $fh = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpper()
+        if ($fh -eq $ioc) { Log-Detail "Confirm-IocFile: hash match $path"; return $true }
+        Log-Detail "Confirm-IocFile: on-disk hash $fh != IOC $ioc ($path) - not a match"
+        return $false
+    } catch {
+        Log-Detail "Confirm-IocFile: $path unreadable ($($_.Exception.Message)) - trusting alert IOC, treating as match"
+        return $true
     }
 }
 
@@ -113,29 +413,14 @@ foreach ($_gp in $guardCandidates) {
     }
 }
 
-# GUARD 25may2569 (Fix 4): refuse all destructive AR actions when alert
-# targets a file inside a Windows system binary path. The MISP feed has
-# been observed to ship hashes of standard Windows binaries (gcapi.dll on
-# 19 may, SysWOW64\rundll32.exe on 25 may). If those hashes match, AR
-# would attempt to kill + delete system binaries -> permanent Windows
-# corruption (especially via MoveFileEx delete-on-reboot fallback).
-# We are 100% downstream of the MISP feed (cannot fix upstream), so this
-# safeguard is the last defense.
-$protectedSystemPaths = @(
-    "C:\Windows\System32\",
-    "C:\Windows\SysWOW64\",
-    "C:\Windows\WinSxS\",
-    "C:\Windows\assembly\",
-    "C:\Windows\Microsoft.NET\",
-    "C:\Program Files\Windows Defender\",
-    "C:\Program Files (x86)\ossec-agent\"
-)
+# GUARD (see Test-ProtectedSystemFile): the MISP feed has shipped hashes of
+# genuine Windows binaries (gcapi.dll 19 may, SysWOW64\rundll32.exe 25 may). If
+# such a hash matches a signed OS file, refuse and exit. Unsigned masquerade
+# files under a system path fall through to normal containment.
 foreach ($_gp in $guardCandidates) {
-    foreach ($_pp in $protectedSystemPaths) {
-        if ($_gp.ToLower().StartsWith($_pp.ToLower())) {
-            Log-Detail "EARLY EXIT (protected system path): $_gp - MISP feed likely contaminated with Windows system binary hash, refusing kill/delete"
-            exit 0
-        }
+    if (Test-ProtectedSystemFile $_gp) {
+        Log-Detail "EARLY EXIT (protected signed system file): $_gp - refusing kill/delete"
+        exit 0
     }
 }
 
@@ -183,19 +468,18 @@ Log-Detail "Image(global): $imagePathGlobal | Syscheck: $filePath | Agent: $agen
 
 $handledBySpecificBlock = $eventID -in @("1","6","7","15","26","29")
 
+# Does any path field in this alert actually point at a file on disk? If not, and we
+# still hold a sha256 IOC, this is a metadata-only alert (Mode B) handled after the
+# specific blocks by hash-locating the file in known drop dirs.
+$anyDiskTarget = @($imagePathGlobal, $alert.data.win.eventdata.imageLoaded, $alert.data.win.eventdata.targetFilename, $filePath) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
 # 5. Generic fallback
 if ($IOCtype -eq "sha256" -and $imagePathGlobal -and -not $handledBySpecificBlock) {
-    if (Test-Path $imagePathGlobal) {
-        try {
-            $fh = (Get-FileHash $imagePathGlobal -Algorithm SHA256).Hash.ToUpper()
-            if ($fh -eq $IOCvalue) {
-                Log-Detail "Generic HASH MATCH (EventID=$eventID)"
-                Start-DFIRBackground -EventType "Sysmon_Generic_${eventID}" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $imagePathGlobal -ProcessImage $imagePathGlobal -ProcessId $processId -AgentName $agentName
-                if ($processId) { try { Stop-Process -Id $processId -Force; Log-Detail "Killed PID: $processId" } catch {} }
-                try { Remove-Item $imagePathGlobal -Force; Log-Detail "Deleted: $imagePathGlobal" } catch { Log-Detail "Delete failed: $($_.Exception.Message)" }
-            } else { Log-Detail "Generic: hash mismatch" }
-        } catch { Log-Detail "Generic error: $($_.Exception.Message)" }
-    }
+    if (Confirm-IocFile $imagePathGlobal $IOCvalue) {
+        Log-Detail "Generic MATCH (EventID=$eventID)"
+        Start-DFIRBackground -EventType "Sysmon_Generic_${eventID}" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $imagePathGlobal -ProcessImage $imagePathGlobal -ProcessId $processId -AgentName $agentName
+        Invoke-Containment -TargetFile $imagePathGlobal -ProcessId $processId -Hash $IOCvalue
+    } else { Log-Detail "Generic: no match" }
 }
 
 # 5b. Event 1
@@ -203,19 +487,11 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "1") {
     $ev1_img = $alert.data.win.eventdata.image
     $ev1_pid = $alert.data.win.eventdata.processId
     Log-Detail "Event 1: $ev1_img (PID=$ev1_pid)"
-    $ev1_match = $false
-    if ($ev1_img -and (Test-Path $ev1_img)) {
-        try { $fh = (Get-FileHash $ev1_img -Algorithm SHA256).Hash.ToUpper(); Log-Detail "Event1 file=$fh IOC=$IOCvalue"; if ($fh -eq $IOCvalue) { $ev1_match = $true } else { Log-Detail "Event1: mismatch" } } catch { Log-Detail "Event1 hash error: $($_.Exception.Message)" }
-    } else { Log-Detail "Event1: image not on disk: $ev1_img" }
+    $ev1_match = Confirm-IocFile $ev1_img $IOCvalue
 
     Start-DFIRBackground -EventType "Event1" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -ProcessImage $ev1_img -ProcessId $ev1_pid -ParentImage $parentImage -AgentName $agentName
 
-    if ($ev1_match) {
-        if ($ev1_pid) { try { Stop-Process -Id $ev1_pid -Force; Log-Detail "Killed PID: $ev1_pid" } catch { Log-Detail "Kill PID failed: $($_.Exception.Message)" } }
-        if ($ev1_img) { try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev1_img } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; Log-Detail "Killed matching PID: $($_.ProcessId)" } } catch {} }
-        Start-Sleep -Seconds 1
-        if ($ev1_img -and (Test-Path $ev1_img)) { try { Remove-Item $ev1_img -Force; Log-Detail "Deleted: $ev1_img" } catch { Log-Detail "Delete failed: $($_.Exception.Message)" } }
-    }
+    if ($ev1_match) { Invoke-Containment -TargetFile $ev1_img -ProcessId $ev1_pid -Hash $IOCvalue }
 }
 
 # 5c. Event 6
@@ -223,19 +499,8 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "6") {
     $ev6_drv = $alert.data.win.eventdata.imageLoaded
     Log-Detail "Event 6: driver=$ev6_drv"
     Start-DFIRBackground -EventType "Event6" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev6_drv -AgentName $agentName
-    if ($ev6_drv -and (Test-Path $ev6_drv)) {
-        try {
-            $fh = (Get-FileHash $ev6_drv -Algorithm SHA256).Hash.ToUpper()
-            Log-Detail "Event6 file=$fh IOC=$IOCvalue"
-            if ($fh -eq $IOCvalue) {
-                try {
-                    Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FHDrv { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -ErrorAction SilentlyContinue
-                    if ([FHDrv]::MoveFileEx($ev6_drv,$null,[FHDrv]::D)) { Log-Detail "Scheduled driver delete on reboot: $ev6_drv" } else { Log-Detail "MoveFileEx failed (Event6)" }
-                } catch { Log-Detail "Driver delete error: $($_.Exception.Message)" }
-                try { $n=[System.IO.Path]::GetFileNameWithoutExtension($ev6_drv); $s=Get-Service -Name $n -EA SilentlyContinue; if($s){Stop-Service $n -Force -EA SilentlyContinue;Set-Service $n -StartupType Disabled;Log-Detail "Disabled service: $n"} } catch {}
-            } else { Log-Detail "Event6: mismatch" }
-        } catch { Log-Detail "Event6 error: $($_.Exception.Message)" }
-    }
+    if (Confirm-IocFile $ev6_drv $IOCvalue) { Invoke-Containment -TargetFile $ev6_drv -Hash $IOCvalue }
+    else { Log-Detail "Event6: no match" }
 }
 
 # 5d. Event 7
@@ -243,21 +508,9 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "7") {
     $ev7_dll  = $alert.data.win.eventdata.imageLoaded
     $ev7_proc = $alert.data.win.eventdata.image
     Log-Detail "Event 7: dll=$ev7_dll loadedBy=$ev7_proc"
-    $ev7_match = $false
-    if ($ev7_dll -and (Test-Path $ev7_dll)) {
-        try { $fh=(Get-FileHash $ev7_dll -Algorithm SHA256).Hash.ToUpper(); Log-Detail "Event7 file=$fh IOC=$IOCvalue"; if($fh -eq $IOCvalue){$ev7_match=$true}else{Log-Detail "Event7: mismatch"} } catch { Log-Detail "Event7 hash error: $($_.Exception.Message)" }
-    } else { Log-Detail "Event7: DLL not found: $ev7_dll" }
+    $ev7_match = Confirm-IocFile $ev7_dll $IOCvalue
     Start-DFIRBackground -EventType "Event7" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev7_dll -ProcessImage $ev7_proc -AgentName $agentName
-    if ($ev7_match) {
-        try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev7_proc } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Killed PID: $($_.ProcessId)" } } catch { Log-Detail "Kill process failed: $($_.Exception.Message)" }
-        Start-Sleep -Seconds 2
-        if ($ev7_dll -and (Test-Path $ev7_dll)) {
-            try { Remove-Item $ev7_dll -Force; Log-Detail "Deleted DLL: $ev7_dll" }
-            catch {
-                try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FHDll { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FHDll]::MoveFileEx($ev7_dll,$null,[FHDll]::D)){Log-Detail "Scheduled DLL delete on reboot: $ev7_dll"}else{Log-Detail "MoveFileEx failed (Event7)"} } catch { Log-Detail "Schedule failed (Event7): $($_.Exception.Message)" }
-            }
-        }
-    }
+    if ($ev7_match) { Invoke-Containment -TargetFile $ev7_dll -Hash $IOCvalue }
 }
 
 # 5e. Event 15
@@ -265,26 +518,11 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "15") {
     $ev15_tgt = $alert.data.win.eventdata.targetFilename
     $ev15_src = $alert.data.win.eventdata.image
     Log-Detail "Event 15: targetFile=$ev15_tgt writtenBy=$ev15_src"
-    if ($ev15_tgt -and (Test-Path $ev15_tgt)) {
-        try {
-            $fh = (Get-FileHash $ev15_tgt -Algorithm SHA256).Hash.ToUpper()
-            Log-Detail "Event15 file=$fh IOC=$IOCvalue"
-            if ($fh -eq $IOCvalue) {
-                Log-Detail "Event 15: HASH MATCH -> kill + delete"
-                Start-DFIRBackground -EventType "Event15" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev15_tgt -ProcessImage $ev15_src -AgentName $agentName
-                try { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$ev15_tgt*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event15: Killed PID $($_.ProcessId)" } } catch { Log-Detail "Event15: Kill failed: $($_.Exception.Message)" }
-                $handleExe = "C:\Tools\handle64.exe"
-                if (Test-Path $handleExe) { try { & $handleExe -accepteula -nobanner "$ev15_tgt" 2>&1 | ForEach-Object { if ($_ -match "pid: (\d+)") { Stop-Process -Id $matches[1] -Force -EA SilentlyContinue; Log-Detail "Event15: Killed handle PID $($matches[1])" } } } catch { Log-Detail "handle64 failed: $($_.Exception.Message)" } }
-                Start-Sleep -Seconds 2
-                try { Remove-Item $ev15_tgt -Force; Log-Detail "Event15: Deleted: $ev15_tgt" }
-                catch {
-                    $del = $false
-                    try { Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$ev15_tgt`"" -WindowStyle Hidden -Wait; if(-not(Test-Path $ev15_tgt)){$del=$true;Log-Detail "Event15: Deleted via cmd"} } catch {}
-                    if (-not $del) { try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FH15 { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FH15]::MoveFileEx($ev15_tgt,$null,[FH15]::D)){Log-Detail "Event15: Scheduled delete on reboot"}else{Log-Detail "Event15: MoveFileEx failed"} } catch { Log-Detail "Event15: All delete failed: $($_.Exception.Message)" } }
-                }
-            } else { Log-Detail "Event15: mismatch (file=$fh IOC=$IOCvalue)" }
-        } catch { Log-Detail "Event15 error: $($_.Exception.Message)" }
-    } else { Log-Detail "Event15: targetFile not found: $ev15_tgt" }
+    if (Confirm-IocFile $ev15_tgt $IOCvalue) {
+        Log-Detail "Event 15: MATCH -> containment"
+        Start-DFIRBackground -EventType "Event15" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev15_tgt -ProcessImage $ev15_src -AgentName $agentName
+        Invoke-Containment -TargetFile $ev15_tgt -Hash $IOCvalue
+    } else { Log-Detail "Event15: no match" }
 }
 
 # 5f. Event 26
@@ -293,14 +531,9 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "26") {
     $ev26_img = $alert.data.win.eventdata.image
     Log-Detail "Event 26 (File Delete Detected): $ev26_tgt"
     Start-DFIRBackground -EventType "Event26" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev26_tgt -ProcessImage $ev26_img -AgentName $agentName
-    if ($ev26_tgt -and (Test-Path $ev26_tgt)) {
-        try {
-            $fh = (Get-FileHash $ev26_tgt -Algorithm SHA256).Hash.ToUpper()
-            Log-Detail "Event26 file=$fh IOC=$IOCvalue"
-            if ($fh -eq $IOCvalue) { try { Remove-Item $ev26_tgt -Force; Log-Detail "Event26: Deleted original: $ev26_tgt" } catch { Log-Detail "Event26: Delete failed: $($_.Exception.Message)" } }
-            else { Log-Detail "Event26: mismatch" }
-        } catch { Log-Detail "Event26 hash error: $($_.Exception.Message)" }
-    } else { Log-Detail "Event26: Original gone - checking Sysmon archive" }
+    if (Confirm-IocFile $ev26_tgt $IOCvalue) { Invoke-Containment -TargetFile $ev26_tgt -Hash $IOCvalue }
+    elseif (Test-Path -LiteralPath $ev26_tgt) { Log-Detail "Event26: no match" }
+    else { Log-Detail "Event26: Original gone - checking Sysmon archive" }
     foreach ($ad in @("C:\Sysmon","C:\Windows\Sysmon","C:\ProgramData\Sysmon")) {
         if (Test-Path $ad) { $af = Join-Path $ad $IOCvalue; if (Test-Path $af) { try { Remove-Item $af -Force; Log-Detail "Event26: Deleted archive: $af" } catch { Log-Detail "Event26: Delete archive failed: $($_.Exception.Message)" } } else { Log-Detail "Event26: No archive at: $af" } }
     }
@@ -312,39 +545,30 @@ if ($IOCtype -eq "sha256" -and $eventID -eq "29") {
     $ev29_tgt = $alert.data.win.eventdata.targetFilename
     $ev29_img = $alert.data.win.eventdata.image
     Log-Detail "Event 29 (File Executable Detected): $ev29_tgt"
-    if ($ev29_tgt -and (Test-Path $ev29_tgt)) {
-        try {
-            $fh = (Get-FileHash $ev29_tgt -Algorithm SHA256).Hash.ToUpper()
-            Log-Detail "Event29 file=$fh IOC=$IOCvalue"
-            if ($fh -eq $IOCvalue) {
-                Log-Detail "Event 29: HASH MATCH -> kill + delete"
-                Start-DFIRBackground -EventType "Event29" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev29_tgt -ProcessImage $ev29_img -AgentName $agentName
-                if ($ev29_img) { try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev29_img } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event29: Killed parent PID $($_.ProcessId)" } } catch { Log-Detail "Event29: Kill parent failed: $($_.Exception.Message)" } }
-                try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $ev29_tgt } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "Event29: Killed target PID $($_.ProcessId)" } } catch { Log-Detail "Event29: Kill target failed: $($_.Exception.Message)" }
-                Start-Sleep -Seconds 2
-                try { Remove-Item $ev29_tgt -Force; Log-Detail "Event29: Deleted: $ev29_tgt" }
-                catch { try { Add-Type -TypeDefinition "using System; using System.Runtime.InteropServices; public class FH29 { [DllImport(`"kernel32.dll`",SetLastError=true,CharSet=CharSet.Unicode)] public static extern bool MoveFileEx(string a,string b,int f); public const int D=4; }" -EA SilentlyContinue; if([FH29]::MoveFileEx($ev29_tgt,$null,[FH29]::D)){Log-Detail "Event29: Scheduled delete on reboot"}else{Log-Detail "Event29: MoveFileEx failed"} } catch { Log-Detail "Event29: Schedule failed: $($_.Exception.Message)" } }
-            } else { Log-Detail "Event29: mismatch (file=$fh IOC=$IOCvalue)" }
-        } catch { Log-Detail "Event29 error: $($_.Exception.Message)" }
-    } else { Log-Detail "Event29: targetFile not found: $ev29_tgt" }
+    if (Confirm-IocFile $ev29_tgt $IOCvalue) {
+        Log-Detail "Event 29: MATCH -> containment"
+        Start-DFIRBackground -EventType "Event29" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $ev29_tgt -ProcessImage $ev29_img -AgentName $agentName
+        Invoke-Containment -TargetFile $ev29_tgt -Hash $IOCvalue
+    } else { Log-Detail "Event29: no match" }
 }
 
 # 6. FIM
 if ($IOCtype -eq "sha256" -and $filePath) {
-    if (Test-Path $filePath) {
-        try {
-            $fh = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToUpper()
-            if ($fh -eq $IOCvalue) {
-                Log-Detail "FIM HASH MATCH -> kill + delete"
-                Start-DFIRBackground -EventType "FIM" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $filePath -AgentName $agentName
-                try { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $filePath } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "FIM: Killed PID (ExecutablePath): $($_.ProcessId)" } } catch { Log-Detail "FIM: Kill by ExecutablePath failed: $($_.Exception.Message)" }
-                try { Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$filePath*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue; Log-Detail "FIM: Killed PID (CommandLine): $($_.ProcessId)" } } catch { Log-Detail "FIM: Kill by CommandLine failed: $($_.Exception.Message)" }
-                Start-Sleep -Seconds 2
-                try { Remove-Item $filePath -Force; Log-Detail "FIM: Deleted: $filePath" }
-                catch { try { Start-Process "cmd.exe" -ArgumentList "/c del /f /q `"$filePath`"" -WindowStyle Hidden; Log-Detail "FIM: Scheduled delete via cmd: $filePath" } catch { Log-Detail "FIM: Delete failed: $($_.Exception.Message)" } }
-            } else { Log-Detail "FIM: mismatch (file=$fh IOC=$IOCvalue)" }
-        } catch { Log-Detail "FIM error: $($_.Exception.Message)" }
-    } else { Log-Detail "FIM: File not found: $filePath" }
+    if (Confirm-IocFile $filePath $IOCvalue) {
+        Log-Detail "FIM MATCH -> containment"
+        Start-DFIRBackground -EventType "FIM" -IOCValue $IOCvalue -IOCType $IOCtype -AlertJson $inputJson -TargetFile $filePath -AgentName $agentName
+        Invoke-Containment -TargetFile $filePath -Hash $IOCvalue
+    } else { Log-Detail "FIM: no match" }
+}
+
+# 6b. Mode B: metadata-only alert carried a sha256 but no event field points at a
+# file on disk. Hash-locate in known drop dirs and contain what we find. Guarded so
+# it only runs when no specific block already had an on-disk target to act on.
+if ($IOCtype -eq "sha256" -and -not $anyDiskTarget) {
+    Log-Detail "Mode B: no on-disk target in alert fields - hash-locating $IOCvalue"
+    $located = Find-ByHash -Sha256 $IOCvalue
+    if ($located) { Invoke-Containment -TargetFile $located -Hash $IOCvalue }
+    else { Log-Detail "Mode B: hash not located in known drop dirs" }
 }
 
 # 7. Network Block (Event 3)

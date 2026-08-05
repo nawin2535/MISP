@@ -62,6 +62,9 @@ if [[ "$DAYS" -gt 0 ]]; then
 fi
 URL_SRC="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-src"
 URL_DST="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-dst"
+# Composite ip-*|port types (ThreatFox C2 IoCs) — URL-encode | as %7C
+URL_SRC_PORT="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-src%7Cport"
+URL_DST_PORT="$BASE/attributes/restSearch/$COMMON_FILTERS/type:ip-dst%7Cport"
 
 BLACKLIST_FILE="/var/ossec/etc/lists/blacklist-ip"
 TMP_FILE="$(mktemp /tmp/blacklist-ip.XXXXXX)"
@@ -93,15 +96,21 @@ fetch_misp() {
 window_note=$([[ "$DAYS" -gt 0 ]] && echo "attribute_timestamp=${DAYS}d" || echo "no time filter")
 echo "$(date '+%F %T') INFO: Fetching ip-src + ip-dst from MISP ($window_note)"
 
-response_src=""; response_dst=""
+response_src=""; response_dst=""; response_src_port=""; response_dst_port=""
 fetch_misp "$URL_SRC" "ip-src" response_src
 fetch_misp "$URL_DST" "ip-dst" response_dst
+# Composite — non-fatal if MISP rejects URL encoding (older MISP versions)
+fetch_misp "$URL_SRC_PORT" "ip-src|port" response_src_port || response_src_port=""
+fetch_misp "$URL_DST_PORT" "ip-dst|port" response_dst_port || response_dst_port=""
 
-# --- Process: extract IPv4 lines, append ':' for CDB key-only format ---
+# --- Process: strip |port from composite values, then keep IPv4 lines ---
 {
     printf '%s\n' "$response_src"
     printf '%s\n' "$response_dst"
-} | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $0":"}' \
+    printf '%s\n' "$response_src_port"
+    printf '%s\n' "$response_dst_port"
+} | sed 's/|[0-9][0-9]*$//' \
+  | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $0":"}' \
   | sort -u > "$TMP_FILE"
 
 count=$(wc -l < "$TMP_FILE" | tr -d ' ')

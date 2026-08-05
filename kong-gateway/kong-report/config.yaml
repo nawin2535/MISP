@@ -1,0 +1,41 @@
+# CSOC-SSJ Kong Gateway Daily Report — config
+# deploy: /opt/csoc-kong-report/config.yaml (mode 644)
+
+inbox:
+  # JSON drop point จาก kong-gateway-225 (shipped by run_daily.sh @ kong-225)
+  path: /opt/csoc-kong-report/inbox
+  # inbox JSON เก็บถาวร 365d — feed kong_aggregate.py (Risk Portal monthly PDF)
+  retention_days: 365
+
+report:
+  timezone: Asia/Bangkok
+  window: yesterday
+  templates_dir: /opt/csoc-kong-report/templates
+  snapshot_dir: /opt/csoc-kong-report/reports/archive
+  retention_days: 365     # 365 วัน align กับ FW report
+
+email:
+  # enabled 2026-06-27 — recipient list = same as FW daily report (user confirmed Phase 7.5)
+  enabled: true
+  subject_template: "[CSOC-SSJ][Kong] Daily {date_iso} — req={req} bytes={bytes} attacks={att} errors={err}"
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_tls: true
+  smtp_user: "noreplyssjmukdahan@gmail.com"
+  smtp_pass_env: "SMTP_PASSWORD"     # อ่านจาก env (.env) — อย่าใส่ password ที่นี่!
+  from_addr: "noreplyssjmukdahan@gmail.com"
+  from_name: "CSOC SSJ Kong"
+  reply_to: "ict.ssjmuk@gmail.com"
+  recipients:
+    - nawin.kt2535@gmail.com
+    - nawin-k-00036@moph.go.th
+    - ict.ssjmuk@gmail.com
+
+org:
+  name: "สนง.สาธารณสุขจังหวัดมุกดาหาร"
+
+generator: "csoc-kong-report main.py v1"
+
+logging:
+  level: INFO
+  path: /var/log/csoc-kong-report/cron.log

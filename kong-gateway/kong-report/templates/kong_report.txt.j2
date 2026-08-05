@@ -1,0 +1,208 @@
+================================================================================
+  CSOC-SSJ — KONG GATEWAY DAILY REPORT — {{ date_iso }}
+================================================================================
+วันที่ {{ date_th }} · ขอบเขต {{ date_iso }} 00:00-23:59 BKK · ออก {{ generated_at }}
+{{ org.name }}
+
+Source: {{ access.source_file | basename }} + {{ errors.source_file | basename }}
+Window: {{ access.first_ts | fmt_ts_short }} → {{ access.last_ts | fmt_ts_short }}
+
+────────────────────────────────────────────────────────────────────────────────
+SUMMARY
+────────────────────────────────────────────────────────────────────────────────
+Requests parsed       : {{ access.totals.parsed | fmt_int }}
+Bytes sent            : {{ access.totals.bytes_sent | fmt_bytes }}
+Unique source IPs     : {{ access.totals.unique_src_ips | fmt_int }}  ({{ access.new_ips.count | default(0) }} new)
+Unique paths          : {{ access.totals.unique_paths_normalized | fmt_int }} normalized / {{ access.totals.unique_paths_raw | fmt_int }} raw
+Attack signature hits : {{ access.request_param_anomaly.total_hits | fmt_int }}  ({{ access.request_param_anomaly.unique_ips | fmt_int }} unique IPs)
+Errors parsed         : {{ errors.totals.parsed | fmt_int }} ({{ errors.by_level.error | default(0) }} crit / {{ errors.by_level.warn | default(0) }} warn)
+
+────────────────────────────────────────────────────────────────────────────────
+S1. SERVICE VOLUME
+────────────────────────────────────────────────────────────────────────────────
+Category breakdown:
+{% for c in access.category_breakdown -%}
+  {{ '%-22s' | format(c.category) }} req={{ c.requests | fmt_int }}  bytes={{ c.bytes | fmt_bytes }}  services={{ c.services }}
+{% endfor %}
+Top services (by requests) — prefix = Kong URI route:
+{% for s in access.service_breakdown[:15] -%}
+  {{ '%-22s' | format(s.service) }} [{{ s.category }}]  prefix={{ s.prefix | default('-') }}  req={{ s.requests | fmt_int }}  bytes={{ s.bytes | fmt_bytes }}
+{% endfor %}
+
+────────────────────────────────────────────────────────────────────────────────
+S2. STATUS & HOURLY
+────────────────────────────────────────────────────────────────────────────────
+Status buckets: {% for k,v in access.status_buckets.items() %}{{ k }}={{ v | fmt_int }} {% endfor %}
+
+Top status codes:
+{% for code, cnt in (access.status_codes_top.items() | list)[:10] -%}
+  {{ '%-4s' | format(code) }}  {{ cnt | fmt_int }}
+{% endfor %}
+
+────────────────────────────────────────────────────────────────────────────────
+S3. IP FOOTPRINT (top 30 — per-IP profile)
+────────────────────────────────────────────────────────────────────────────────
+รวมพฤติกรรม per IP: paths, method หลัก, status distribution, top paths
+{% set new_ip_set = (access.new_ips.top or []) | map(attribute='ip') | list -%}
+{% if access.ip_footprint -%}
+{% for r in access.ip_footprint -%}
+{{ '%2d' | format(loop.index) }}. {{ '%-18s' | format(r.ip) }} req={{ r.requests | fmt_int }} paths={{ r.distinct_paths }} method={{ r.top_method }} 2xx={{ r.status_2xx }} 3xx={{ r.status_3xx }} 4xx={{ r.status_4xx }} 5xx={{ r.status_5xx }} bytes={{ r.bytes_out | fmt_bytes }}{% if r.ip in new_ip_set %} [NEW-IP]{% endif %}
+{% for p in r.top_paths[:3] -%}
+      {{ p.path }} ({{ p.count }})
+{% endfor -%}
+{% endfor -%}
+{% else %}(no IP footprint){% endif %}
+
+{% if access.new_ips.warming_up -%}
+[!] Baseline warming up — {{ access.new_ips.baseline_days }} วันใน DB จาก {{ access.new_ips.lookback_days }} วัน lookback
+{% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S3b. PATH LONG TAIL — group by URL (rank 31+, top 50 only, ดูเต็มได้ใน HTML)
+────────────────────────────────────────────────────────────────────────────────
+Flip จาก IP→Paths เป็น Path→IPs — เห็น "1 IP ยิง path เดียว" (LONE) ได้ชัด
+{% if access.path_long_tail -%}
+Total: {{ access.path_long_tail | length }} paths · 1-HIT={{ access.path_long_tail | selectattr('one_hit') | list | length }} · LONE={{ access.path_long_tail | selectattr('distinct_ips', 'equalto', 1) | list | length }} · sort by path
+{% for r in access.path_long_tail[:100] -%}
+  req={{ '%-4d' | format(r.requests) }} ips={{ '%-3d' | format(r.distinct_ips) }} {{ r.dominant_status }} 2xx={{ r.status_2xx }} 3xx={{ r.status_3xx }} 4xx={{ r.status_4xx }} 5xx={{ r.status_5xx }}{% if r.one_hit_iso %} [1-HIT-ISO]{% elif r.one_hit %} [1-HIT]{% elif r.distinct_ips == 1 %} [LONE]{% endif %}
+      path: {{ r.path }}
+      ips : {% for ipx in r.ips %}{{ ipx.ip }}{% if ipx.count > 1 %}({{ ipx.count }}){% endif %}{% if ipx.ip in new_ip_set %}*{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endfor -%}
+{% if access.path_long_tail | length > 100 %}  ... และอีก {{ access.path_long_tail | length - 100 }} paths (ดู HTML attachment){% endif %}
+{% else %}(no long tail paths){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S4. PATH REACH — Distinct IPs per Path
+────────────────────────────────────────────────────────────────────────────────
+"distinct_ips" สูง = ปกติ. "distinct_ips=1" = path ที่มี IP เดียวยิง (อาจ recon / typo / leak)
+
+High-reach paths (top 30):
+{% set new_path_set = (access.new_paths.top or []) | map(attribute='path') | list -%}
+{% if access.path_reach.high_reach -%}
+{% for r in access.path_reach.high_reach -%}
+  {{ '%2d' | format(loop.index) }}. req={{ '%-5d' | format(r.requests) }} ips={{ '%-3d' | format(r.distinct_ips) }} {{ r.dominant_status }}  {{ r.path }}{% if r.distinct_ips == 1 %} [LONE]{% endif %}{% if r.path in new_path_set %} [NEW]{% endif %}
+{% endfor -%}
+{% endif %}
+
+Rare-but-successful (distinct_ips=1 + dominant 2xx + count≥2, top 20):
+{% if access.path_reach.rare_2xx -%}
+{% for r in access.path_reach.rare_2xx -%}
+  {{ '%2d' | format(loop.index) }}. hits={{ '%-4d' | format(r.requests) }} ip={{ '%-18s' | format(r.ip) }}  {{ r.path }}{% if r.ip in new_ip_set %} [NEW-IP]{% endif %}{% if r.path in new_path_set %} [NEW-PATH]{% endif %}
+{% endfor -%}
+{% else %}(no rare 2xx paths){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S5. TOP BYTES-OUT (data-exfil candidates)
+────────────────────────────────────────────────────────────────────────────────
+{% if access.top_bytes_out_ips -%}
+{% for r in access.top_bytes_out_ips[:15] -%}
+  {{ '%2d' | format(loop.index) }}. {{ '%-18s' | format(r.ip) }} {{ r.bytes | fmt_bytes }}
+{% endfor -%}
+{% else %}(none){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S6. QUIET COMBOS — Stealth 2xx (Wazuh ไม่จับ)
+────────────────────────────────────────────────────────────────────────────────
+Criteria: {{ access.quiet_combos.criteria | default('2xx + path NOT in top-100 + (lone-path OR new-ip)') }}
+Wazuh จับ 4xx/5xx threshold แล้ว — section นี้เน้น 2xx เนียนที่ Wazuh ไม่เห็น
+{% if access.quiet_combos.warming_up_note -%}
+[!] {{ access.quiet_combos.warming_up_note }}
+{% endif -%}
+{% if access.quiet_combos.rows -%}
+{% for r in access.quiet_combos.rows -%}
+  {{ '%-18s' | format(r.ip) }} {{ '%-6s' | format(r.method) }} {{ r.status }} hits={{ '%-4d' | format(r.count) }} bytes={{ r.bytes | fmt_bytes }}  {{ r.path }}{% if r.is_new_ip %} [NEW-IP]{% endif %}{% if r.is_rare_path %} [LONE-PATH]{% endif %}
+{% endfor -%}
+{% else %}(no stealth combo){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S7. AUTH-SENSITIVE (compact — Wazuh covers 401/403)
+────────────────────────────────────────────────────────────────────────────────
+{% if access.auth_fail_top -%}
+{% for r in access.auth_fail_top[:10] -%}
+  {{ '%-18s' | format(r.ip) }}  401={{ r['401'] }}  403={{ r['403'] }}  total={{ r.total }}
+{% endfor -%}
+{% else %}(none){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S8. CATCHALL (compact — Wazuh covers 4xx)
+────────────────────────────────────────────────────────────────────────────────
+{% if access.catchall_paths_top -%}
+{% for r in access.catchall_paths_top[:10] -%}
+  {{ r.count | fmt_int }}  {{ r.path }}
+{% endfor -%}
+{% else %}(none){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S9. REQUEST PARAM ANOMALY (attack signatures)
+────────────────────────────────────────────────────────────────────────────────
+{% if access.request_param_anomaly.total_hits > 0 -%}
+Total hits: {{ access.request_param_anomaly.total_hits | fmt_int }}  unique IPs: {{ access.request_param_anomaly.unique_ips }}
+
+By category:
+{% for cat, cnt in access.request_param_anomaly.by_category.items() -%}
+  {{ '%-20s' | format(cat) }} {{ cnt | fmt_int }}
+{% endfor -%}
+
+{% if access.request_param_anomaly.top_ips %}
+Top attacker IPs:
+{# schema จาก parse_access.py: total + recon_scanner (ไม่ใช่ count) #}
+{% for r in access.request_param_anomaly.top_ips[:10] -%}
+  {{ '%-18s' | format(r.ip) }} {{ r.total | fmt_int }}{% if r.recon_scanner %} [scanner]{% endif %}
+{% endfor -%}
+{% endif -%}
+{% else %}(no signature hit){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S10. SCANNER TRAFFIC (sanctioned)
+────────────────────────────────────────────────────────────────────────────────
+{% if access.scanner_traffic.total_hits > 0 -%}
+{% for ip, cnt in access.scanner_traffic.by_ip.items() -%}
+  {{ '%-18s' | format(ip) }} {{ cnt | fmt_int }}
+{% endfor -%}
+{% else %}(no scanner traffic){% endif %}
+
+────────────────────────────────────────────────────────────────────────────────
+S11. ERROR LOG — LEVEL & BUCKETS
+────────────────────────────────────────────────────────────────────────────────
+Levels: info={{ errors.by_level.info | default(0) | fmt_int }}  warn={{ errors.by_level.warn | default(0) | fmt_int }}  error={{ errors.by_level.error | default(0) | fmt_int }}
+
+Semantic buckets:
+{% for b in errors.buckets -%}
+  {{ '%-30s' | format(b.bucket) }} {{ b.count | fmt_int }}
+{% endfor %}
+
+────────────────────────────────────────────────────────────────────────────────
+S12. ERROR LOG — TOP CLIENTS / UPSTREAMS / PATTERNS
+────────────────────────────────────────────────────────────────────────────────
+Top clients:
+{% for r in errors.top_clients[:10] -%}
+  {{ '%-18s' | format(r.ip) }} {{ r.count | fmt_int }}
+{% endfor %}
+Top upstreams:
+{% for r in errors.top_upstreams -%}
+  {{ '%-30s' | format(r.upstream) }} {{ r.count | fmt_int }}
+{% endfor %}
+Top error patterns:
+{% for r in errors.top_patterns[:10] -%}
+  {{ r.count | fmt_int }}  {{ r.pattern }}
+{% endfor %}
+
+────────────────────────────────────────────────────────────────────────────────
+GLOSSARY — นิยาม flag/badge
+────────────────────────────────────────────────────────────────────────────────
+[1-HIT-ISO]  S3b — path มี 1 IP ยิง 1 ครั้ง + IP touched ≤2 paths ทั้งวัน
+             = isolated probe จริงๆ ไม่มี browse context → suspicious สูง
+[1-HIT]      S3b — path มี 1 IP ยิง 1 ครั้ง แต่ IP browse >2 paths (session ปกติ)
+[LONE]       S3b/S4 — path มี IP เดียวยิงหลายครั้ง (distinct_ips=1, req>=2)
+[NEW] / *    S3/S3b/S6 — IP/path ไม่เคยเห็นใน baseline 30d (sliding window)
+[NEW-PATH]   S4 — normalized path ไม่เคยเห็นใน baseline 30d
+
+Baseline = sliding 30d บน kong-225 sqlite known_baseline.db (warm-up: --init-baseline 30)
+Normalized path = replace <num>,<uuid>,<img>,<file> ตาม etc/path_normalize.json
+S3b cap = 1000 paths (จาก ~1016 paths rank 31+ ต่อวัน) · เรียง alpha by path
+
+================================================================================
+generator: {{ generator }}  ·  {{ org.name }}
+baseline: known IPs={{ access.baseline_stats.known_ip_count | default(0) }} paths={{ access.baseline_stats.known_path_count | default(0) }}
+replies → ict.ssjmuk@gmail.com
+================================================================================

@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>CSOC-SSJ Kong Report {{ date_iso }}</title>
+<style>
+  body { font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Tahoma, sans-serif;
+         color: #1e293b; background: #eef2f7; margin: 0; padding: 0;
+         -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 980px; margin: 0 auto; background: #ffffff; padding: 0;
+          box-shadow: 0 2px 24px rgba(15,23,42,0.08); }
+  .head-banner { background: linear-gradient(135deg, #042f2e 0%, #0f766e 50%, #0891b2 100%);
+                 color: #fff; padding: 22px 32px; }
+  .head-banner h1 { color: #fff; font-size: 22px; margin: 0; letter-spacing: 0.3px;
+                    text-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+  .head-banner .sub { color: #cbd5e1; font-size: 12px; margin-top: 6px; line-height: 1.6; }
+  .head-banner .sub b { color: #fde047; }
+  .body-pad { padding: 0 32px 32px; }
+  h2 { font-size: 15px; margin: 28px 0 10px; padding: 10px 14px;
+       background: linear-gradient(90deg, #4338ca 0%, #6366f1 100%);
+       color: #fff; border-radius: 6px;
+       box-shadow: 0 1px 4px rgba(67,56,202,0.25); }
+  h2.sec-vol    { background: linear-gradient(90deg, #047857 0%, #059669 100%); }
+  h2.sec-watch  { background: linear-gradient(90deg, #b45309 0%, #d97706 100%); }
+  h2.sec-attack { background: linear-gradient(90deg, #b91c1c 0%, #dc2626 100%); }
+  h2.sec-error  { background: linear-gradient(90deg, #c2410c 0%, #ea580c 100%); }
+  h2.sec-scan   { background: linear-gradient(90deg, #1e40af 0%, #2563eb 100%); }
+  h3 { font-size: 13px; margin: 14px 0 6px; color: #1e293b;
+       padding-left: 8px; border-left: 3px solid #0891b2; }
+  h4 { font-size: 12px; margin: 12px 0 4px; color: #334155; font-weight: 700; }
+  .meta { color: #6b7280; font-size: 12px; margin: 0; }
+  /* Exec hero */
+  .exec { margin: 18px 0 22px; border-radius: 10px; overflow: hidden;
+          box-shadow: 0 4px 16px rgba(15,23,42,0.10); border: 1px solid #e2e8f0; }
+  .exec-hero { background: linear-gradient(135deg, #042f2e 0%, #0f766e 50%, #155e75 100%);
+               color: #fff; padding: 16px 20px; }
+  .exec-hero .title { font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
+  .exec-hero .sub { font-size: 11px; opacity: 0.85; margin-top: 4px; }
+  .exec-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; background: #fff; }
+  .exec-row .zone { padding: 14px 8px; text-align: center;
+                    border-right: 1px solid #e2e8f0; }
+  .exec-row .zone:last-child { border-right: none; }
+  .exec-row .z-label { font-size: 10px; color: #64748b; text-transform: uppercase;
+                       font-weight: 700; letter-spacing: 0.4px; }
+  .exec-row .z-value { font-size: 22px; font-weight: 800; margin: 4px 0; line-height: 1; color: #0f172a; }
+  .exec-row .z-sub { font-size: 10px; color: #64748b; }
+  .exec-row .z-attack { color: #dc2626; }
+  .exec-row .z-error { color: #ea580c; }
+  /* Tables */
+  table { border-collapse: collapse; width: 100%; font-size: 12px; margin: 6px 0 10px;
+          background: #fff; border-radius: 6px; overflow: hidden;
+          box-shadow: 0 1px 2px rgba(15,23,42,0.04); }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #f1f5f9; }
+  th { background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+       font-weight: 700; color: #334155; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.3px; }
+  tr:last-child td { border-bottom: none; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  tr:hover td { background: #fef9c3; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  td.mono { font-family: ui-monospace, "Consolas", "Courier New", monospace; font-size: 11px;
+            color: #475569; word-break: break-all; }
+  /* Badges */
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px;
+           font-size: 10px; font-weight: 700; margin-left: 4px; }
+  .badge-new   { background: linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%); color: #78350f; }
+  .badge-attack { background: #dc2626; color: #fff; }
+  .badge-warn  { background: #fde68a; color: #92400e; }
+  .badge-ok    { background: #dcfce7; color: #166534; }
+  .badge-cat   { background: #e0e7ff; color: #3730a3; padding: 2px 8px;
+                 font-family: ui-monospace, monospace; }
+  /* Hourly bar (simple ASCII-style) */
+  .hour-bars { font-family: ui-monospace, "Consolas", monospace; font-size: 10px;
+               line-height: 1.4; background: #f8fafc; padding: 10px 12px;
+               border-radius: 6px; color: #334155; }
+  .hour-bars .row { display: flex; align-items: center; gap: 6px; }
+  .hour-bars .h { display: inline-block; width: 28px; color: #64748b; }
+  .hour-bars .bar { background: linear-gradient(90deg, #0891b2 0%, #06b6d4 100%);
+                    height: 9px; border-radius: 2px; }
+  .hour-bars .cnt { color: #475569; font-weight: 600; min-width: 50px; text-align: right; }
+  /* Status pills */
+  .status-pills { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+  .status-pill { padding: 8px 14px; border-radius: 6px; background: #f1f5f9;
+                 font-size: 12px; min-width: 90px; text-align: center; }
+  .status-pill .v { font-size: 18px; font-weight: 800; display: block; }
+  .status-pill.s-2xx { background: linear-gradient(180deg, #ecfdf5, #fff); border-top: 3px solid #059669; }
+  .status-pill.s-2xx .v { color: #059669; }
+  .status-pill.s-3xx { background: linear-gradient(180deg, #eff6ff, #fff); border-top: 3px solid #2563eb; }
+  .status-pill.s-3xx .v { color: #2563eb; }
+  .status-pill.s-4xx { background: linear-gradient(180deg, #fff7ed, #fff); border-top: 3px solid #ea580c; }
+  .status-pill.s-4xx .v { color: #ea580c; }
+  .status-pill.s-5xx { background: linear-gradient(180deg, #fef2f2, #fff); border-top: 3px solid #dc2626; }
+  .status-pill.s-5xx .v { color: #dc2626; }
+  .status-pill.s-1xx { background: linear-gradient(180deg, #f5f3ff, #fff); border-top: 3px solid #7c3aed; }
+  .status-pill.s-1xx .v { color: #7c3aed; }
+  /* Note + finding */
+  .note { color: #64748b; font-size: 11px; font-style: italic; margin: 4px 0 8px;
+          padding: 6px 10px; background: #f8fafc; border-radius: 4px; }
+  .empty { color: #9ca3af; font-style: italic; padding: 8px 12px;
+           background: #f8fafc; border-radius: 4px; }
+  .warm-up { background: #fef3c7; color: #92400e; padding: 8px 12px; border-radius: 4px;
+             font-size: 11px; margin: 4px 0; border-left: 3px solid #f59e0b; }
+  .footer { margin-top: 28px; padding: 16px 32px; background: #042f2e;
+            color: #cbd5e1; font-size: 11px; line-height: 1.6; }
+  .footer code { background: #134e4a; padding: 1px 6px; border-radius: 3px;
+                 color: #99f6e4; font-size: 10px; }
+  .footer a { color: #5eead4; }
+  .sample-box { font-family: ui-monospace, "Consolas", monospace; font-size: 10px;
+                background: #fef2f2; color: #7f1d1d; padding: 6px 10px;
+                border-radius: 4px; margin: 2px 0; word-break: break-all;
+                border-left: 3px solid #dc2626; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="head-banner">
+  <h1>🦍 CSOC-SSJ — รายงาน Kong Gateway ประจำวัน</h1>
+  <div class="sub">
+    วันที่ <b>{{ date_th }}</b> · ขอบเขต {{ date_iso }} 00:00–23:59 BKK · ออกรายงาน {{ generated_at }} · {{ org.name }}<br>
+    📡 Source: <code>{{ access.source_file | basename }}</code> + <code>{{ errors.source_file | basename }}</code>
+    · window: {{ access.first_ts | fmt_ts_short }} → {{ access.last_ts | fmt_ts_short }}
+  </div>
+</div>
+
+<div class="body-pad">
+
+{# ───────────── Exec Hero — 6 KPI ───────────── #}
+<div class="exec">
+  <div class="exec-hero">
+    <div class="title">📊 สรุปภาพรวม — Kong Gateway 24 ชม.</div>
+    <div class="sub">บรรทัด log <b>{{ access.totals.lines | fmt_int }}</b> ใช้เวลา parse {{ access.totals.elapsed_sec }}s
+      · errors {{ errors.totals.lines | fmt_int }} บรรทัด {{ errors.totals.elapsed_sec }}s
+      · malformed access={{ access.totals.malformed }} errors={{ errors.totals.malformed }}</div>
+  </div>
+  <div class="exec-row">
+    <div class="zone"><div class="z-label">Requests</div>
+      <div class="z-value">{{ access.totals.parsed | fmt_int }}</div>
+      <div class="z-sub">parsed lines</div></div>
+    <div class="zone"><div class="z-label">Bytes Out</div>
+      <div class="z-value">{{ access.totals.bytes_sent | fmt_bytes }}</div>
+      <div class="z-sub">to clients</div></div>
+    <div class="zone"><div class="z-label">Unique IPs</div>
+      <div class="z-value">{{ access.totals.unique_src_ips | fmt_int }}</div>
+      <div class="z-sub">{{ access.new_ips.count | default(0) }} new vs baseline</div></div>
+    <div class="zone"><div class="z-label">Paths (norm)</div>
+      <div class="z-value">{{ access.totals.unique_paths_normalized | fmt_int }}</div>
+      <div class="z-sub">{{ access.totals.unique_paths_raw | fmt_int }} raw</div></div>
+    <div class="zone"><div class="z-label">Attacks</div>
+      <div class="z-value z-attack">{{ access.request_param_anomaly.total_hits | fmt_int }}</div>
+      <div class="z-sub">signature hits</div></div>
+    <div class="zone"><div class="z-label">Errors</div>
+      <div class="z-value z-error">{{ errors.totals.parsed | fmt_int }}</div>
+      <div class="z-sub">{{ errors.by_level.error | default(0) }} crit / {{ errors.by_level.warn | default(0) }} warn</div></div>
+  </div>
+</div>
+
+{# ───────────── S1. Service Volume ───────────── #}
+<h2 class="sec-vol">S1. Service Volume — Category &amp; Service Breakdown</h2>
+
+<h3>Category breakdown</h3>
+{% if access.category_breakdown %}
+<table>
+  <tr><th>Category</th><th class="num">Requests</th><th class="num">Bytes</th><th class="num">Services</th></tr>
+  {% for c in access.category_breakdown %}
+    <tr><td><span class="badge badge-cat">{{ c.category }}</span></td>
+        <td class="num">{{ c.requests | fmt_int }}</td>
+        <td class="num">{{ c.bytes | fmt_bytes }}</td>
+        <td class="num">{{ c.services }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี category breakdown)</div>{% endif %}
+
+<h3>Top services (by requests) — service = logical name, prefix = Kong URI route</h3>
+{% if access.service_breakdown %}
+<table>
+  <tr><th>Service</th><th>URI Prefix</th><th>Category</th><th class="num">Requests</th><th class="num">Bytes</th>
+      <th class="num">2xx</th><th class="num">3xx</th><th class="num">4xx</th></tr>
+  {% for s in access.service_breakdown[:20] %}
+    <tr><td class="mono">{{ s.service }}</td>
+        <td class="mono">{{ s.prefix | default('-') }}</td>
+        <td><span class="badge badge-cat">{{ s.category }}</span></td>
+        <td class="num">{{ s.requests | fmt_int }}</td>
+        <td class="num">{{ s.bytes | fmt_bytes }}</td>
+        <td class="num">{{ s.status['2xx'] | default(0) | fmt_int }}</td>
+        <td class="num">{{ s.status['3xx'] | default(0) | fmt_int }}</td>
+        <td class="num">{{ s.status['4xx'] | default(0) | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี service breakdown)</div>{% endif %}
+
+{# ───────────── S2. Status + Hourly ───────────── #}
+<h2>S2. Status Distribution &amp; Hourly Pattern</h2>
+
+<div class="status-pills">
+  {% for k in ['1xx','2xx','3xx','4xx','5xx'] %}
+    {% set v = access.status_buckets.get(k, 0) %}
+    {% if v > 0 %}
+      <div class="status-pill s-{{ k }}"><span class="v">{{ v | fmt_int }}</span>{{ k }}</div>
+    {% endif %}
+  {% endfor %}
+</div>
+
+<h4>Status codes — top 10</h4>
+<table>
+  <tr><th>Code</th><th class="num">Count</th><th class="num">%</th></tr>
+  {% set total_codes = access.totals.parsed %}
+  {% for code, cnt in (access.status_codes_top.items() | list)[:10] %}
+    <tr><td class="mono">{{ code }}</td>
+        <td class="num">{{ cnt | fmt_int }}</td>
+        <td class="num">{{ ((cnt / total_codes) * 100) | round(1) }}%</td></tr>
+  {% endfor %}
+</table>
+
+<h4>Requests per hour</h4>
+<div class="hour-bars">
+  {% set max_h = (access.by_hour | max) or 1 %}
+  {% for cnt in access.by_hour %}
+    <div class="row">
+      <span class="h">{{ '%02d' | format(loop.index0) }}:00</span>
+      <span class="bar" style="width: {{ ((cnt / max_h) * 600) | round(0) | int }}px;"></span>
+      <span class="cnt">{{ cnt | fmt_int }}</span>
+    </div>
+  {% endfor %}
+</div>
+
+{# ───────────── S3. IP Footprint ───────────── #}
+<h2>S3. IP Footprint — Per-IP Profile (top 30 by request count)</h2>
+<div class="note">📌 รวมพฤติกรรม per IP: paths ที่ไปสัมผัส, method หลัก, distribution ของ status, top 3 paths — ตอบ "IP นี้ทำอะไรอยู่"</div>
+{% set new_ip_set = (access.new_ips.top or []) | map(attribute='ip') | list %}
+{% if access.ip_footprint %}
+<table>
+  <tr><th>IP</th><th class="num">Req</th><th class="num">Paths</th><th>Method</th>
+      <th class="num">2xx</th><th class="num">3xx</th><th class="num">4xx</th><th class="num">5xx</th>
+      <th class="num">Bytes</th><th>Top 3 paths · Flags</th></tr>
+  {% for r in access.ip_footprint %}
+    <tr><td class="mono">{{ r.ip }}</td>
+        <td class="num">{{ r.requests | fmt_int }}</td>
+        <td class="num">{{ r.distinct_paths }}</td>
+        <td class="mono">{{ r.top_method }}</td>
+        <td class="num">{{ r.status_2xx | fmt_int }}</td>
+        <td class="num">{{ r.status_3xx | fmt_int }}</td>
+        <td class="num">{{ r.status_4xx | fmt_int }}</td>
+        <td class="num">{{ r.status_5xx | fmt_int }}</td>
+        <td class="num">{{ r.bytes_out | fmt_bytes }}</td>
+        <td class="mono">
+          {% for p in r.top_paths %}{{ p.path }} ({{ p.count }}){% if not loop.last %}<br>{% endif %}{% endfor %}
+          {% if r.ip in new_ip_set %} <span class="badge badge-new">NEW-IP</span>{% endif %}
+        </td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% if access.new_ips.warming_up %}
+  <div class="warm-up">⏳ Baseline warming up — {{ access.new_ips.baseline_days }} วันใน DB จาก {{ access.new_ips.lookback_days }} วัน lookback (NEW-IP flag จะ noise สูงจน warm-up ครบ ≥7 วัน)</div>
+{% endif %}
+
+{# ───────────── S3b. Path Long Tail — group by URL (rank 31+) ───────────── #}
+{% if access.path_long_tail %}
+<h3>S3b. Path Long Tail (paths rank 31+, group by URL, sort by path) — {{ access.path_long_tail | length }} rows · 1-HIT={{ access.path_long_tail | selectattr('one_hit') | list | length }} · LONE={{ access.path_long_tail | selectattr('distinct_ips', 'equalto', 1) | list | length }}</h3>
+<div class="note">📌 เรียงตาม path (alpha) → scan รวมกลุ่ม prefix (/smartmom/*, /web1/*). <b>1-HIT-ISO</b> (สีแดง) = 1 IP + 1 hit + IP นั้น touched ≤2 paths ทั้งวัน = isolated probe จริงๆ. <b>1-HIT</b> (สีเหลือง) = 1 IP + 1 hit แต่ IP มี browse session (touched >2 paths) = ปกติ. <b>LONE</b> (สีเหลือง) = path มี IP เดียวยิงหลายครั้ง</div>
+<table style="font-size: 11px; table-layout: fixed; width: 100%;">
+  <colgroup>
+    <col style="width: 38%;"><col style="width: 4%;"><col style="width: 4%;"><col style="width: 5%;">
+    <col style="width: 4%;"><col style="width: 4%;"><col style="width: 4%;"><col style="width: 4%;">
+    <col style="width: 24%;"><col style="width: 9%;">
+  </colgroup>
+  <tr><th>Path</th><th class="num">Req</th><th class="num">IPs</th><th>Status</th>
+      <th class="num">2xx</th><th class="num">3xx</th><th class="num">4xx</th><th class="num">5xx</th>
+      <th>IPs (ทั้งหมด)</th><th>Flags</th></tr>
+  {% for r in access.path_long_tail %}
+    <tr><td class="mono" style="word-break: break-word; font-size: 10.5px;">{{ r.path }}</td>
+        <td class="num">{{ r.requests | fmt_int }}</td>
+        <td class="num">{{ r.distinct_ips }}</td>
+        <td class="mono">{{ r.dominant_status }}</td>
+        <td class="num">{{ r.status_2xx | fmt_int }}</td>
+        <td class="num">{{ r.status_3xx | fmt_int }}</td>
+        <td class="num">{{ r.status_4xx | fmt_int }}</td>
+        <td class="num">{{ r.status_5xx | fmt_int }}</td>
+        <td class="mono" style="font-size: 10px; line-height: 1.5; word-break: break-word;">
+          {% for ipx in r.ips %}{{ ipx.ip }}{% if ipx.count > 1 %}({{ ipx.count }}){% endif %}{% if ipx.ip in new_ip_set %}*{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+        </td>
+        <td>
+          {% if r.one_hit_iso %}<span class="badge badge-attack">1-HIT-ISO</span>{% elif r.one_hit %}<span class="badge badge-warn">1-HIT</span>{% elif r.distinct_ips == 1 %}<span class="badge badge-warn">LONE</span>{% endif %}
+          {% set has_new = namespace(v=false) %}
+          {% for ipx in r.ips %}{% if ipx.ip in new_ip_set %}{% set has_new.v = true %}{% endif %}{% endfor %}
+          {% if has_new.v %}<span class="badge badge-new">NEW-IP</span>{% endif %}
+        </td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{# ───────────── S4. Path Reach ───────────── #}
+<h2>S4. Path Reach — Distinct IPs per Path</h2>
+<div class="note">📌 "distinct_ips" สูง = path ปกติของระบบ. "distinct_ips=1" = path ที่มี IP เดียวยิง (อาจเป็น recon / typo / data leak — ตรวจ context)</div>
+
+<h3>High-reach paths (top 30 by request count)</h3>
+{% set new_path_set = (access.new_paths.top or []) | map(attribute='path') | list %}
+{% if access.path_reach.high_reach %}
+<table>
+  <tr><th>#</th><th>Path (normalized)</th><th class="num">Requests</th><th class="num">Distinct IPs</th><th>Status</th><th>Flags</th></tr>
+  {% for r in access.path_reach.high_reach %}
+    <tr><td class="num">{{ loop.index }}</td>
+        <td class="mono">{{ r.path }}</td>
+        <td class="num">{{ r.requests | fmt_int }}</td>
+        <td class="num">{{ r.distinct_ips }}</td>
+        <td class="mono">{{ r.dominant_status }}</td>
+        <td>
+          {% if r.distinct_ips == 1 %}<span class="badge badge-warn">LONE</span>{% endif %}
+          {% if r.path in new_path_set %} <span class="badge badge-new">NEW</span>{% endif %}
+        </td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3>Rare-but-successful paths — distinct_ips=1 + dominant 2xx + count≥2 (top 20)</h3>
+<div class="note">⚠ Path ที่ <b>มี IP เดียวยิง</b> + <b>ได้ 200/2xx</b> + <b>ยิงซ้ำ ≥ 2 ครั้ง</b> = อาจเป็น automation/script/leak — ควรตรวจว่ารู้จัก IP คนนั้นไหม</div>
+{% if access.path_reach.rare_2xx %}
+<table>
+  <tr><th>#</th><th>Path</th><th>Only IP</th><th class="num">Hits</th><th>Flags</th></tr>
+  {% for r in access.path_reach.rare_2xx %}
+    <tr><td class="num">{{ loop.index }}</td>
+        <td class="mono">{{ r.path }}</td>
+        <td class="mono">{{ r.ip }}</td>
+        <td class="num">{{ r.requests | fmt_int }}</td>
+        <td>{% if r.ip in new_ip_set %}<span class="badge badge-new">NEW-IP</span>{% endif %}
+            {% if r.path in new_path_set %} <span class="badge badge-new">NEW-PATH</span>{% endif %}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี rare 2xx paths)</div>{% endif %}
+
+{# ───────────── S5. Top bytes-out ───────────── #}
+<h2 class="sec-watch">S5. Top Bytes-Out — Data Exfiltration Candidates</h2>
+<div class="note">⚠ IP ที่ดูดข้อมูลออกเยอะ (bytes sent โดย Kong → client). ตรวจ context ก่อนสรุปว่า abuse</div>
+{% if access.top_bytes_out_ips %}
+<table>
+  <tr><th>#</th><th>IP</th><th class="num">Bytes</th></tr>
+  {% for r in access.top_bytes_out_ips[:15] %}
+    <tr><td class="num">{{ loop.index }}</td>
+        <td class="mono">{{ r.ip }}</td>
+        <td class="num">{{ r.bytes | fmt_bytes }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี)</div>{% endif %}
+
+{# ───────────── S6. Quiet Combos — STEALTH 2xx ───────────── #}
+<h2 class="sec-attack">S6. Quiet Combos — Stealth 2xx (signals Wazuh misses)</h2>
+<div class="note">📌 <b>{{ access.quiet_combos.criteria }}</b>. Wazuh จับ 4xx/5xx threshold อยู่แล้ว — section นี้เน้น <b>2xx ที่เนียน</b> (Wazuh ไม่จับ): IP แปลก หรือ path ที่มีคนเดียวยิงสำเร็จ</div>
+{% if access.quiet_combos.warming_up_note %}
+  <div class="warm-up">⏳ {{ access.quiet_combos.warming_up_note }}</div>
+{% endif %}
+{% if access.quiet_combos.rows %}
+<table>
+  <tr><th>IP</th><th>Method</th><th>Path</th><th class="num">Status</th>
+      <th class="num">Hits</th><th class="num">Bytes</th><th>Flags</th></tr>
+  {% for r in access.quiet_combos.rows %}
+    <tr><td class="mono">{{ r.ip }}</td>
+        <td class="mono">{{ r.method }}</td>
+        <td class="mono">{{ r.path }}</td>
+        <td class="num">{{ r.status }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td>
+        <td class="num">{{ r.bytes | fmt_bytes }}</td>
+        <td>{% if r.is_new_ip %}<span class="badge badge-new">NEW-IP</span>{% endif %}
+            {% if r.is_rare_path %} <span class="badge badge-warn">LONE-PATH</span>{% endif %}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่พบ stealth combo ใน window นี้)</div>{% endif %}
+
+{# ───────────── S7. Auth-Sensitive (compact — Wazuh covers 401/403) ───────────── #}
+<h2 class="sec-watch">S7. Auth-Sensitive (compact) — 401/403 by IP</h2>
+<div class="note">ℹ Wazuh มี rule alert 401/403 threshold อยู่แล้ว — section นี้แสดงไว้ cross-reference</div>
+{% if access.auth_fail_top %}
+<table>
+  <tr><th>IP</th><th class="num">401</th><th class="num">403</th><th class="num">Total</th></tr>
+  {% for r in access.auth_fail_top[:10] %}
+    <tr><td class="mono">{{ r.ip }}</td>
+        <td class="num">{{ r['401'] | fmt_int }}</td>
+        <td class="num">{{ r['403'] | fmt_int }}</td>
+        <td class="num">{{ r.total | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี auth failure)</div>{% endif %}
+
+{# ───────────── S8. Catchall (compact — Wazuh covers 4xx) ───────────── #}
+<h2 class="sec-watch">S8. Catchall (compact) — Unmapped Paths</h2>
+<div class="note">ℹ Path ที่ไม่ match Kong route — มักโดน 4xx ซึ่ง Wazuh จับ; แสดงไว้สำหรับ tune route map</div>
+{% if access.catchall_paths_top %}
+<table>
+  <tr><th>#</th><th>Path</th><th class="num">Count</th></tr>
+  {% for r in access.catchall_paths_top[:10] %}
+    <tr><td class="num">{{ loop.index }}</td>
+        <td class="mono">{{ r.path }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี catchall path)</div>{% endif %}
+
+{# ───────────── S9. Request Param Anomaly ───────────── #}
+<h2 class="sec-attack">S9. Request Param Anomaly — Signature-based Attack Detection</h2>
+{% if access.request_param_anomaly.total_hits > 0 %}
+<div class="status-pills">
+  <div class="status-pill s-4xx"><span class="v">{{ access.request_param_anomaly.total_hits | fmt_int }}</span>total hits</div>
+  <div class="status-pill s-4xx"><span class="v">{{ access.request_param_anomaly.unique_ips | fmt_int }}</span>unique IPs</div>
+</div>
+
+<h4>By category</h4>
+<table>
+  <tr><th>Category</th><th class="num">Hits</th></tr>
+  {% for cat, cnt in access.request_param_anomaly.by_category.items() %}
+    <tr><td><span class="badge badge-attack">{{ cat }}</span></td>
+        <td class="num">{{ cnt | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+
+{% if access.request_param_anomaly.top_ips %}
+<h4>Top attacker IPs</h4>
+<table>
+  <tr><th>IP</th><th class="num">Hits</th></tr>
+  {# schema จาก parse_access.py: total + recon_scanner (ไม่ใช่ count) #}
+  {% for r in access.request_param_anomaly.top_ips[:10] %}
+    <tr><td class="mono">{{ r.ip }}{% if r.recon_scanner %} <span class="badge">scanner</span>{% endif %}</td>
+        <td class="num">{{ r.total | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if access.request_param_anomaly.samples %}
+<h4>Samples (first 10)</h4>
+{% for s in access.request_param_anomaly.samples[:10] %}
+  <div class="sample-box">[{{ s.categories | join(', ') }}] {{ s.ip }} → {{ s.uri }}</div>
+{% endfor %}
+{% endif %}
+{% else %}
+<div class="empty">(ไม่พบ attack signature ใน window นี้)</div>
+{% endif %}
+
+{# ───────────── S9. Scanner Traffic ───────────── #}
+<h2 class="sec-scan">S10. Scanner Traffic — Sanctioned (CSOC Internal Probes)</h2>
+<div class="note">{{ access.scanner_traffic.note | default('Whitelisted scanner IPs — sanctioned, separated from S8 attacks') }}</div>
+{% if access.scanner_traffic.total_hits > 0 %}
+<table>
+  <tr><th>Scanner IP</th><th class="num">Hits</th></tr>
+  {% for ip, cnt in access.scanner_traffic.by_ip.items() %}
+    <tr><td class="mono">{{ ip }}</td><td class="num">{{ cnt | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% if access.scanner_traffic.by_category %}
+<h4>By category</h4>
+<table>
+  <tr><th>Category</th><th class="num">Hits</th></tr>
+  {% for cat, cnt in access.scanner_traffic.by_category.items() %}
+    <tr><td><span class="badge badge-cat">{{ cat }}</span></td><td class="num">{{ cnt | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% else %}<div class="empty">(ไม่มี scanner traffic)</div>{% endif %}
+
+{# ───────────── S10. Errors — levels + buckets ───────────── #}
+<h2 class="sec-error">S11. Error Log — Level &amp; Semantic Buckets</h2>
+
+<div class="status-pills">
+  <div class="status-pill s-2xx"><span class="v">{{ errors.by_level.info | default(0) | fmt_int }}</span>info</div>
+  <div class="status-pill s-4xx"><span class="v">{{ errors.by_level.warn | default(0) | fmt_int }}</span>warn</div>
+  <div class="status-pill s-5xx"><span class="v">{{ errors.by_level.error | default(0) | fmt_int }}</span>error</div>
+</div>
+
+<h3>Semantic buckets</h3>
+{% if errors.buckets %}
+<table>
+  <tr><th>Bucket</th><th class="num">Count</th><th>Top clients</th></tr>
+  {% for b in errors.buckets %}
+    <tr><td class="mono">{{ b.bucket }}</td>
+        <td class="num">{{ b.count | fmt_int }}</td>
+        <td class="mono">{% for c in b.top_clients[:3] %}{{ c.ip }}({{ c.count }}){% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="empty">(ไม่มี error bucket)</div>{% endif %}
+
+{# ───────────── S11. Errors — clients/upstreams/patterns/requests ───────────── #}
+<h2 class="sec-error">S12. Error Log — Top Clients · Upstreams · Patterns</h2>
+
+<h3>Top clients (by error count)</h3>
+{% if errors.top_clients %}
+<table>
+  <tr><th>#</th><th>IP</th><th class="num">Errors</th></tr>
+  {% for r in errors.top_clients[:15] %}
+    <tr><td class="num">{{ loop.index }}</td>
+        <td class="mono">{{ r.ip }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3>Top upstreams (backend with errors)</h3>
+{% if errors.top_upstreams %}
+<table>
+  <tr><th>Upstream</th><th class="num">Errors</th></tr>
+  {% for r in errors.top_upstreams %}
+    <tr><td class="mono">{{ r.upstream }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3>Top error patterns</h3>
+{% if errors.top_patterns %}
+<table>
+  <tr><th>Pattern</th><th class="num">Count</th></tr>
+  {% for r in errors.top_patterns[:10] %}
+    <tr><td class="mono">{{ r.pattern }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h3>Top failing requests</h3>
+{% if errors.top_requests %}
+<table>
+  <tr><th>Request</th><th class="num">Count</th></tr>
+  {% for r in errors.top_requests[:10] %}
+    <tr><td class="mono">{{ r.request }}</td>
+        <td class="num">{{ r.count | fmt_int }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{# ───────────── Glossary ───────────── #}
+<h2 style="background: linear-gradient(90deg, #475569 0%, #64748b 100%);">Glossary — นิยาม flag/badge ในรายงาน</h2>
+<table style="font-size: 12px;">
+  <tr><th style="width: 18%;">Badge</th><th>นิยาม</th></tr>
+  <tr><td><span class="badge badge-attack">1-HIT-ISO</span></td>
+      <td>S3b — path มี 1 IP ยิง 1 ครั้ง และ IP นั้น touched ≤ 2 paths ทั้งวัน = <b>isolated probe ครั้งเดียวจริงๆ</b> ไม่มี browse context รอบข้าง → suspicious สูง</td></tr>
+  <tr><td><span class="badge badge-warn">1-HIT</span></td>
+      <td>S3b — path มี 1 IP ยิง 1 ครั้ง แต่ IP นั้น touched > 2 paths ทั้งวัน = ส่วนหนึ่งของ browse session ปกติ (เช่น single-page asset load) → ต่ำกว่า 1-HIT-ISO</td></tr>
+  <tr><td><span class="badge badge-warn">LONE</span></td>
+      <td>S3b/S4 — path มี IP เดียวยิง <i>หลายครั้ง</i> (distinct_ips=1, requests≥2) = automation/script/internal admin → ตรวจ context IP ก่อนสรุป</td></tr>
+  <tr><td><span class="badge badge-new">NEW-IP</span></td>
+      <td>S3/S3b/S6 — IP นี้ไม่เคยเห็นใน baseline (sliding window 30 วัน) → first-seen vs โหลด history</td></tr>
+  <tr><td><span class="badge badge-new">NEW-PATH</span></td>
+      <td>S4 — path normalized นี้ไม่เคยเห็นใน baseline 30 วัน → new endpoint deployed หรือ recon hit endpoint ที่ไม่มีจริง</td></tr>
+  <tr><td><span class="badge badge-attack">SQL_INJECTION / XSS / ...</span></td>
+      <td>S9 — signature category ที่ match attack pattern (sql_injection, path_traversal, xss, cmd_injection, lfi_rfi, recon_scanner, null_byte, log4shell_jndi)</td></tr>
+  <tr><td><b>*</b> (asterisk in TXT) / <span class="badge badge-new">N</span> (HTML)</td>
+      <td>S3b — IP นั้นใน list เป็น NEW-IP (compact marker ในเซลล์ IPs list)</td></tr>
+</table>
+<div class="note" style="font-size: 11px;">
+  <b>Baseline = </b>sliding window 30 วัน บน kong-225 (sqlite <code>known_baseline.db</code>) — IP/path ที่ปรากฏใน window นี้ถือว่า "known". warm-up ครั้งแรก seed ด้วย <code>--init-baseline 30</code><br>
+  <b>Normalized path = </b>path ที่ replace tokens (<code>&lt;num&gt;</code>, <code>&lt;uuid&gt;</code>, <code>&lt;img&gt;</code>, <code>&lt;file&gt;</code>) จาก raw URI ตาม <code>etc/path_normalize.json</code> — ลด noise<br>
+  <b>S3b cap</b> = 1000 paths (จาก ~1016 paths rank 31+ ต่อวัน) · เรียง alpha by path
+</div>
+
+</div><!-- /body-pad -->
+
+<div class="footer">
+  ระบบ CSOC-SSJ Kong Gateway Daily Report · generator: <code>{{ generator }}</code> · {{ org.name }}<br>
+  Source layer: Kong access log (<code>/var/log/kong-docker.log-*.gz</code>) + nginx error log (<code>/var/log/docker-kong-errors.log-*.gz</code>) — retention 90 วันที่ kong-225, archive รายงาน 365 วันที่ CT 2065<br>
+  Data window: {{ access.first_ts | fmt_ts_short }} → {{ access.last_ts | fmt_ts_short }} · baseline known IPs={{ access.baseline_stats.known_ip_count | default(0) }} paths={{ access.baseline_stats.known_path_count | default(0) }}<br>
+  รายงานอัตโนมัติ — replies → <a href="mailto:ict.ssjmuk@gmail.com">ict.ssjmuk@gmail.com</a>
+</div>
+
+</div><!-- /wrap -->
+</body>
+</html>

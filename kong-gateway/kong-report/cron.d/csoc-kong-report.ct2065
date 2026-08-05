@@ -1,0 +1,10 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=""
+
+# minute hour day month dow user command
+# Kong daily report renderer — 15 min after kong-225 ship (04:00)
+# - reads /opt/csoc-kong-report/inbox/YYYY-MM-DD/{access,errors}.json
+# - renders HTML + TXT + saves snapshot to reports/snapshot/YYYY-MM-DD/
+# - sends email if config.yaml email.enabled=true (default false until recipient confirmed)
+15 4 * * * root /opt/csoc-kong-report/bin/run.sh /opt/csoc-kong-report/bin/main.py >> /var/log/csoc-kong-report/cron-stdout.log 2>&1

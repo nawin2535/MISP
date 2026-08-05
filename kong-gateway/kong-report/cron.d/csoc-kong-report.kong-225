@@ -1,0 +1,8 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=""
+
+# minute hour day month dow user command
+# Kong daily report — parse yesterday access+errors, ship JSON to CT 2065
+# 04:00 = logrotate 00:00 + 4h buffer, ahead of reconcile-kong-misp 04:30
+00 4 * * * ssjmuk_admax /opt/csoc-kong-report/bin/run_daily.sh >> /var/log/csoc-kong-report/cron-stdout.log 2>&1

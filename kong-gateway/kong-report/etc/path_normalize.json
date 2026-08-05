@@ -1,0 +1,54 @@
+{
+  "_meta": {
+    "purpose": "collapse parameterized path segments so top-paths aggregate by template, not by unique id/hash",
+    "applied_in_order": true,
+    "note": "rule.name appears in JSON output for transparency; tweak as new patterns appear"
+  },
+  "rules": [
+    {
+      "name": "strip-query-string",
+      "pattern": "\\?.*$",
+      "replacement": ""
+    },
+    {
+      "name": "uploads-images-with-hash",
+      "pattern": "^(/[^/]+/uploads/[^/]+/[^/]+)/[a-f0-9]{16,}\\.(jpg|jpeg|png|gif|webp|mp4|pdf)$",
+      "replacement": "\\1/<hash>.\\2"
+    },
+    {
+      "name": "uploads-generic-deep",
+      "pattern": "^(/[^/]+/uploads/[^/]+)/[^/]+/[^/]+\\.([a-zA-Z0-9]+)$",
+      "replacement": "\\1/<dir>/<file>.\\2"
+    },
+    {
+      "name": "next-static-chunk",
+      "pattern": "^(/_next/static)/[^/]+/(.+\\.(js|css|woff2?|map))$",
+      "replacement": "\\1/<build>/\\2"
+    },
+    {
+      "name": "long-hex-segment",
+      "pattern": "/[a-f0-9]{16,}(?=/|$|\\.)",
+      "replacement": "/<hex>"
+    },
+    {
+      "name": "uuid-segment",
+      "pattern": "/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "replacement": "/<uuid>"
+    },
+    {
+      "name": "long-numeric-id",
+      "pattern": "/[0-9]{6,}(?=/|$|\\.)",
+      "replacement": "/<num>"
+    },
+    {
+      "name": "image-asset-suffix",
+      "pattern": "\\.(jpg|jpeg|png|gif|webp|svg|ico)$",
+      "replacement": ".<img>"
+    },
+    {
+      "name": "trailing-slash-collapse",
+      "pattern": "//+",
+      "replacement": "/"
+    }
+  ]
+}

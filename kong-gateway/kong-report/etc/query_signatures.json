@@ -1,0 +1,127 @@
+{
+  "_meta": {
+    "purpose": "regex signatures for suspicious patterns in URI path + query string",
+    "scope": "Kong access log URI field only (no body, no headers)",
+    "match_target": "url-decoded URI (decoded once to catch %2e%2e etc)",
+    "severity": "high|medium|low — affects sort order in report only",
+    "tuning": "add patterns as new attack signatures appear; remove if too noisy"
+  },
+  "whitelist_ips": [
+    "10.10.64.64"
+  ],
+  "_whitelist_note": "sanctioned internal scanners (CSOC portscanner, vuln scanners). Hits still counted in stats.scanner_traffic but NOT reported as attacks.",
+  "categories": [
+    {
+      "name": "sql_injection",
+      "severity": "high",
+      "patterns": [
+        "\\bunion\\s+(?:all\\s+)?select\\b",
+        "\\bor\\s+1\\s*=\\s*1\\b",
+        "\\band\\s+1\\s*=\\s*1\\b",
+        "';--",
+        "'\\s*or\\s*'1'\\s*=\\s*'1",
+        "\\bxp_cmdshell\\b",
+        "\\bsleep\\s*\\(\\s*\\d+",
+        "\\bbenchmark\\s*\\(",
+        "\\bwaitfor\\s+delay\\b",
+        "\\bload_file\\s*\\(",
+        "\\binto\\s+outfile\\b",
+        "/\\*!\\d+",
+        "\\bconcat\\s*\\(.*\\bselect\\b"
+      ]
+    },
+    {
+      "name": "path_traversal",
+      "severity": "high",
+      "patterns": [
+        "\\.\\./\\.\\./",
+        "\\.\\.[\\\\/]\\.\\.[\\\\/]",
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/hosts",
+        "/proc/self/",
+        "/windows/system32",
+        "/boot\\.ini",
+        "\\\\windows\\\\system32"
+      ]
+    },
+    {
+      "name": "xss",
+      "severity": "high",
+      "patterns": [
+        "<script[\\s>]",
+        "javascript:",
+        "\\bonerror\\s*=",
+        "\\bonload\\s*=",
+        "\\bonmouseover\\s*=",
+        "<iframe[\\s>]",
+        "<svg[\\s/>]",
+        "\\balert\\s*\\(",
+        "document\\.cookie",
+        "<img[^>]+src\\s*=\\s*['\"]?javascript:"
+      ]
+    },
+    {
+      "name": "cmd_injection",
+      "severity": "high",
+      "patterns": [
+        ";\\s*(?:cat|ls|id|whoami|uname|nc|netcat|wget|curl|chmod|chown|rm)\\b",
+        "\\|\\s*(?:nc|sh|bash|cat|wget|curl)\\b",
+        "\\$\\([^)]+\\)",
+        "`[^`]+`",
+        "&&\\s*(?:cat|ls|id|nc|wget|curl)",
+        "\\b/bin/(?:sh|bash|nc)\\b"
+      ]
+    },
+    {
+      "name": "lfi_rfi",
+      "severity": "high",
+      "patterns": [
+        "\\bfile://",
+        "\\bphp://(?:filter|input|expect)",
+        "\\bdata:(?:text|application)/[^,]+,",
+        "\\bexpect://",
+        "\\bgopher://",
+        "\\bdict://"
+      ]
+    },
+    {
+      "name": "recon_scanner",
+      "severity": "medium",
+      "patterns": [
+        "/\\.git/(?:config|HEAD|index)",
+        "/\\.env(?:$|[?/])",
+        "/\\.aws/credentials",
+        "/\\.ssh/(?:id_rsa|authorized_keys)",
+        "/wp-(?:admin|login|config)",
+        "/phpmyadmin(?:/|$)",
+        "/admin/config",
+        "/server-status",
+        "/web\\.config",
+        "/_vti_bin",
+        "/cgi-bin/",
+        "/x?vpns?/",
+        "nice ports,",
+        "/api/v\\d+/\\?",
+        "Trinity\\.txt"
+      ]
+    },
+    {
+      "name": "null_byte",
+      "severity": "high",
+      "patterns": [
+        "\\x00",
+        "%00"
+      ]
+    },
+    {
+      "name": "log4shell_jndi",
+      "severity": "high",
+      "patterns": [
+        "\\$\\{jndi:",
+        "\\$\\{lower:j\\}",
+        "\\$\\{env:"
+      ]
+    }
+  ]
+}

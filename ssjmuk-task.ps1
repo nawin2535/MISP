@@ -18,9 +18,10 @@ $GitHubBaseUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/ma
 
 # File server (primary source) - ตั้งค่าจริงใน Phase 2 (HTTP mirror ของ repo tree)
 # ว่าง หรือมี "<host>" = ยังไม่ตั้ง -> ข้าม primary ไป GitHub ตรงๆ (zero-cost จนกว่าจะพร้อม)
-# Phase 2 file server พร้อมแล้ว: http://cyberupdate-mdo.moph.go.th:19080 (flip เป็นค่านี้หลัง validate Phase 1)
-# ใช้ hostname (ไม่ใช่ IP) เพื่อ decouple - ย้าย server เปลี่ยน IP แค่แก้ DNS ไม่ต้อง push ใหม่
-$FileServerBaseUrl = ""
+# Phase 2 LIVE (2026-08-10): file server = primary, GitHub = fallback อัตโนมัติ
+# hostname (decouple IP) - client resolve ผ่าน org DNS ที่ firewall. ย้าย server แก้ DNS อย่างเดียว
+# ถ้าเครื่องใด reach/resolve ไม่ได้ -> timeout 10s -> fallback GitHub (เห็น Fetch Source:GitHub ใน Discord)
+$FileServerBaseUrl = "http://cyberupdate-mdo.moph.go.th:19080"
 
 # Discord Webhook
 $DiscordWebhookUrl = "https://discord.com/api/webhooks/1485825229547901110/tGVBhaf47J26DYuWaxlaHvUzXF3iKop1TxqSCSFPUn_nEx-2iJTbMRctZfjgYrtMGaFY"

@@ -60,6 +60,9 @@ $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หร
 # Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
 $script:JitterInfo = $null
 
+# นับ source ที่ดึงไฟล์สำเร็จ (FileServer/GitHub/Upstream) เพื่อโชว์ใน Discord summary
+$script:FetchSources = @{}
+
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)]
@@ -181,6 +184,11 @@ function Send-DiscordSummary {
         @{
             name   = "Jitter"
             value  = "``$(if ($script:JitterInfo) { if ($script:JitterInfo -eq 'skip') { 'skipped (manual/non-SYSTEM)' } else { "$($script:JitterInfo) sec" } } else { 'N/A' })``"
+            inline = $true
+        },
+        @{
+            name   = "Fetch Source"
+            value  = "``$(if ($script:FetchSources.Count -gt 0) { ($script:FetchSources.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key):$($_.Value)" }) -join '  ' } else { 'N/A' })``"
             inline = $true
         },
         @{
@@ -455,6 +463,8 @@ function Get-StagedDownload {
                 if (Test-DownloadedFile -Path $TempPath -MinBytes $MinBytes -EndMarker $EndMarker -IsPowerShell $IsPowerShell) {
                     $kb = [math]::Round((Get-Item $TempPath).Length/1KB, 2)
                     Write-Log "Fetched+validated '$RelPath' <- $($src.Name) ($kb KB)" "SUCCESS"
+                    if (-not $script:FetchSources.ContainsKey($src.Name)) { $script:FetchSources[$src.Name] = 0 }
+                    $script:FetchSources[$src.Name]++
                     return $TempPath
                 }
                 Write-Log "Integrity check failed for '$RelPath' <- $($src.Name)" "WARNING"

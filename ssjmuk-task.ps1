@@ -18,7 +18,8 @@ $GitHubBaseUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/ma
 
 # File server (primary source) - ตั้งค่าจริงใน Phase 2 (HTTP mirror ของ repo tree)
 # ว่าง หรือมี "<host>" = ยังไม่ตั้ง -> ข้าม primary ไป GitHub ตรงๆ (zero-cost จนกว่าจะพร้อม)
-# Phase 2 file server พร้อมแล้ว: http://10.10.62.182:19080 (flip เป็นค่านี้หลัง validate Phase 1)
+# Phase 2 file server พร้อมแล้ว: http://cyberupdate-mdo.moph.go.th:19080 (flip เป็นค่านี้หลัง validate Phase 1)
+# ใช้ hostname (ไม่ใช่ IP) เพื่อ decouple - ย้าย server เปลี่ยน IP แค่แก้ DNS ไม่ต้อง push ใหม่
 $FileServerBaseUrl = ""
 
 # Discord Webhook
@@ -55,6 +56,9 @@ $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
 
 # Step 7: เก็บ version info สำหรับแสดงใน Discord summary
 $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หรือ "4.14.5 (up-to-date)"
+
+# Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
+$script:JitterInfo = $null
 
 function Write-Log {
     param(
@@ -172,7 +176,12 @@ function Send-DiscordSummary {
         @{
             name   = "Time"
             value  = "``$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')``"
-            inline = $false
+            inline = $true
+        },
+        @{
+            name   = "Jitter"
+            value  = "``$(if ($script:JitterInfo) { if ($script:JitterInfo -eq 'skip') { 'skipped (manual/non-SYSTEM)' } else { "$($script:JitterInfo) sec" } } else { 'N/A' })``"
+            inline = $true
         },
         @{
             name   = "Step Results"
@@ -1106,6 +1115,13 @@ $script:AbortReason = $null
 try {
     Initialize-Logging
     Cleanup-OldLogs
+
+    # อ่านค่า jitter ที่ launcher สุ่มไว้ (เขียนตอนเริ่ม sleep ก่อน download)
+    $JitterFile = Join-Path $ScriptPath "last_jitter.txt"
+    if (Test-Path $JitterFile) {
+        $script:JitterInfo = (Get-Content $JitterFile -Raw -ErrorAction SilentlyContinue).Trim()
+        Write-Log "Launcher jitter: $script:JitterInfo" "INFO"
+    }
 
     Write-Log "Computer: $env:COMPUTERNAME | User: $env:USERNAME" "INFO"
     Write-Log "PowerShell: $($PSVersionTable.PSVersion)" "INFO"

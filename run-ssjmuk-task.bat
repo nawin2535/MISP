@@ -21,7 +21,7 @@ REM Gate ด้วย IsSystem: scheduled task รันเป็น SYSTEM -> j
 REM test รันเป็น user -> skip (ชี้ขาดแน่นอน ไม่ขึ้นกับ session/desktop)
 REM ============================================================================
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-    "if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { $s = Get-Random -Minimum 0 -Maximum 900; Write-Host ('Jitter: sleeping ' + $s + ' sec (anti-429)...'); Start-Sleep -Seconds $s } else { Write-Host 'Not SYSTEM (manual/test) - skipping jitter' }"
+    "$jf='%~dp0last_jitter.txt'; if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { $s = Get-Random -Minimum 0 -Maximum 900; Set-Content -Path $jf -Value $s -Encoding ascii; Write-Host ('Jitter: sleeping ' + $s + ' sec (anti-429)...'); Start-Sleep -Seconds $s } else { Set-Content -Path $jf -Value 'skip' -Encoding ascii; Write-Host 'Not SYSTEM (manual/test) - skipping jitter' }"
 
 REM Configuration
 set SCRIPT_DIR=%~dp0

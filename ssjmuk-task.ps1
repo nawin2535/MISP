@@ -28,8 +28,8 @@ $DiscordWebhookUrl = "https://discord.com/api/webhooks/1485825229547901110/tGVBh
 
 # Step 7: Wazuh Agent Upgrade Configuration
 # แก้ไขค่านี้เมื่อต้องการ upgrade เป็น version ใหม่
-$VersionWazuh  = "4.14.5"
-$URL_Download  = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.5-1.msi"
+$VersionWazuh  = "4.14.7"
+$URL_Download  = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.7-1.msi"
 
 # Scripts to download from GitHub before execution
 $ScriptsToDownload = @(

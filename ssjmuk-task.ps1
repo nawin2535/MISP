@@ -13,8 +13,13 @@ $LogFile = Join-Path $LogDir "ssjmuk-task_$(Get-Date -Format 'yyyyMMdd_HHmmss').
 $MaxRetries = 5
 $RetryDelaySeconds = 60
 
-# GitHub Configuration
+# GitHub Configuration (fallback source)
 $GitHubBaseUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main"
+
+# File server (primary source) - ตั้งค่าจริงใน Phase 2 (HTTP mirror ของ repo tree)
+# ว่าง หรือมี "<host>" = ยังไม่ตั้ง -> ข้าม primary ไป GitHub ตรงๆ (zero-cost จนกว่าจะพร้อม)
+# Phase 2 file server พร้อมแล้ว: http://10.10.62.182:19080 (flip เป็นค่านี้หลัง validate Phase 1)
+$FileServerBaseUrl = ""
 
 # Discord Webhook
 $DiscordWebhookUrl = "https://discord.com/api/webhooks/1485825229547901110/tGVBhaf47J26DYuWaxlaHvUzXF3iKop1TxqSCSFPUn_nEx-2iJTbMRctZfjgYrtMGaFY"
@@ -341,86 +346,222 @@ function Cleanup-OldLogs {
     }
 }
 
-function Download-ScriptFromGitHub {
+# ============================================================================
+# Download with file-server primary + GitHub fallback + atomic group commit
+# ----------------------------------------------------------------------------
+# ปลอดภัยกับ deploy 80+ เครื่อง: ไฟล์ partial/เสีย ไม่มีทางไปทับตัวจริง
+# (stage -> integrity verify -> commit เท่านั้น) + atomic ต่อกลุ่มไฟล์ที่ dependent กัน
+# ============================================================================
+
+# ตรวจไฟล์ที่โหลดมาว่า "สมบูรณ์+ใช้ได้" ก่อนยอมให้ commit
+function Test-DownloadedFile {
     param(
-        [Parameter(Mandatory=$true)]  [string]$GitHubUrl,
-        [Parameter(Mandatory=$true)]  [string]$LocalPath,
-        [Parameter(Mandatory=$true)]  [string]$ScriptName,
-        [Parameter(Mandatory=$false)] [int]$MaxRetries = 5,
-        [Parameter(Mandatory=$false)] [int]$RetryDelaySeconds = 10
+        [Parameter(Mandatory=$true)]  [string]$Path,
+        [Parameter(Mandatory=$false)] [int]$MinBytes = 500,
+        [Parameter(Mandatory=$false)] [string]$EndMarker = $null,
+        [Parameter(Mandatory=$false)] [bool]$IsPowerShell = $false
     )
 
-    $Attempt = 0
-    $Success = $false
+    if (-not (Test-Path $Path)) { return $false }
+    $len = (Get-Item $Path).Length
+    if ($len -lt $MinBytes) {
+        Write-Log "Integrity: too small ($len < $MinBytes bytes) - rejecting" "WARNING"
+        return $false
+    }
 
-    while ($Attempt -lt $MaxRetries -and -not $Success) {
-        $Attempt++
-        Write-Log "Downloading '$ScriptName' (Attempt $Attempt/$MaxRetries)..." "INFO"
+    $content = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($content)) {
+        Write-Log "Integrity: empty/whitespace content - rejecting" "WARNING"
+        return $false
+    }
 
-        try {
-            if (-not (Test-InternetConnection)) {
-                Write-Log "No internet connection. Waiting $RetryDelaySeconds seconds..." "WARNING"
-                if ($Attempt -lt $MaxRetries) {
-                    Start-Sleep -Seconds $RetryDelaySeconds
-                    continue
-                } else {
-                    Write-Log "Max retries reached. Internet still unavailable." "ERROR"
-                    return $false
-                }
-            }
+    # กัน HTML error page ที่ถูก serve เป็น HTTP 200 (429 page / captive portal / proxy)
+    $head = $content.Substring(0, [Math]::Min(512, $content.Length))
+    if ($head -match '(?i)<!DOCTYPE|<html|<head\b|<body\b|Too Many Requests|Rate limit') {
+        Write-Log "Integrity: looks like HTML/error page - rejecting" "WARNING"
+        return $false
+    }
 
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -Uri $GitHubUrl -OutFile $LocalPath -UseBasicParsing -ErrorAction Stop
-
-            if (Test-Path $LocalPath) {
-                $FileSize = (Get-Item $LocalPath).Length
-                Write-Log "Downloaded '$ScriptName' ($([math]::Round($FileSize/1KB, 2)) KB)" "SUCCESS"
-                $Success = $true
-            } else {
-                Write-Log "Download completed but file not found: $LocalPath" "ERROR"
-                if ($Attempt -lt $MaxRetries) { Start-Sleep -Seconds $RetryDelaySeconds }
-            }
-        } catch {
-            Write-Log "Failed to download '$ScriptName': $($_.Exception.Message)" "ERROR"
-            if ($Attempt -lt $MaxRetries) {
-                Write-Log "Waiting $RetryDelaySeconds seconds before retry..." "WARNING"
-                Start-Sleep -Seconds $RetryDelaySeconds
-            }
+    # กัน truncation: end-marker ต้องอยู่ในช่วงท้ายไฟล์ (พิสูจน์ว่าโหลดถึงจบจริง)
+    if ($EndMarker) {
+        $tailLen = [Math]::Min(400, $content.Length)
+        $tail = $content.Substring($content.Length - $tailLen)
+        if ($tail -notmatch [regex]::Escape($EndMarker)) {
+            Write-Log "Integrity: end-marker '$EndMarker' not found in tail - possible truncation" "WARNING"
+            return $false
         }
     }
 
-    if (-not $Success) {
-        Write-Log "Failed to download '$ScriptName' after $MaxRetries attempts" "ERROR"
+    # full parse (ไม่ใช่แค่ tokenize) จับ brace ไม่ครบจาก truncation กลาง function
+    if ($IsPowerShell) {
+        $tokens = $null; $perr = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$perr)
+        if ($perr -and $perr.Count -gt 0) {
+            Write-Log "Integrity: PowerShell parse errors ($($perr.Count)) - rejecting" "WARNING"
+            return $false
+        }
     }
 
-    return $Success
+    return $true
+}
+
+# โหลด 1 ไฟล์ลง .tmp (primary file server -> fallback GitHub) + verify. ไม่แตะ target เด็ดขาด
+# คืน path ของ .tmp ที่ verify ผ่าน หรือ $null ถ้าทุก source fail
+function Get-StagedDownload {
+    param(
+        [Parameter(Mandatory=$true)]  [string]$RelPath,
+        [Parameter(Mandatory=$true)]  [string]$TargetPath,
+        [Parameter(Mandatory=$false)] [int]$MinBytes = 500,
+        [Parameter(Mandatory=$false)] [string]$EndMarker = $null,
+        [Parameter(Mandatory=$false)] [bool]$IsPowerShell = $false,
+        [Parameter(Mandatory=$false)] [int]$GitHubRetries = 5,
+        [Parameter(Mandatory=$false)] [int]$RetryDelaySeconds = 10,
+        [Parameter(Mandatory=$false)] [string]$AbsoluteUrl = $null   # ไฟล์จาก repo/host อื่น (เช่น action-script upstream): source เดียว ไม่ผ่าน base URL
+    )
+
+    $TempPath = "$TargetPath.tmp"
+    if (Test-Path $TempPath) { Remove-Item $TempPath -Force -ErrorAction SilentlyContinue }
+
+    # สร้างลำดับ source
+    $sources = @()
+    if ($AbsoluteUrl) {
+        # ไฟล์ upstream คนละ repo -> source เดียว (GitHub-only) แต่ยังผ่าน stage+integrity เหมือนกัน
+        $sources += @{ Name = "Upstream"; Url = $AbsoluteUrl; TimeoutSec = 60; Retries = $GitHubRetries }
+    } else {
+        # primary (file server) เฉพาะเมื่อตั้งค่าจริงแล้ว, ตามด้วย GitHub เสมอ
+        if ($FileServerBaseUrl -and ($FileServerBaseUrl.Trim() -ne "") -and ($FileServerBaseUrl -notmatch '<host>')) {
+            $sources += @{ Name = "FileServer"; Url = "$FileServerBaseUrl/$RelPath"; TimeoutSec = 10; Retries = 1 }
+        }
+        $sources += @{ Name = "GitHub"; Url = "$GitHubBaseUrl/$RelPath"; TimeoutSec = 60; Retries = $GitHubRetries }
+    }
+
+    foreach ($src in $sources) {
+        for ($attempt = 1; $attempt -le $src.Retries; $attempt++) {
+            Write-Log "Fetch '$RelPath' <- $($src.Name) (attempt $attempt/$($src.Retries))" "INFO"
+            try {
+                if (Test-Path $TempPath) { Remove-Item $TempPath -Force -ErrorAction SilentlyContinue }
+                $ProgressPreference = 'SilentlyContinue'
+                Invoke-WebRequest -Uri $src.Url -OutFile $TempPath -UseBasicParsing -TimeoutSec $src.TimeoutSec -ErrorAction Stop
+
+                if (Test-DownloadedFile -Path $TempPath -MinBytes $MinBytes -EndMarker $EndMarker -IsPowerShell $IsPowerShell) {
+                    $kb = [math]::Round((Get-Item $TempPath).Length/1KB, 2)
+                    Write-Log "Fetched+validated '$RelPath' <- $($src.Name) ($kb KB)" "SUCCESS"
+                    return $TempPath
+                }
+                Write-Log "Integrity check failed for '$RelPath' <- $($src.Name)" "WARNING"
+            } catch {
+                Write-Log "Fetch '$RelPath' <- $($src.Name) failed: $($_.Exception.Message)" "WARNING"
+            }
+            if ($attempt -lt $src.Retries) { Start-Sleep -Seconds $RetryDelaySeconds }
+        }
+    }
+
+    if (Test-Path $TempPath) { Remove-Item $TempPath -Force -ErrorAction SilentlyContinue }
+    Write-Log "All sources failed for '$RelPath'" "ERROR"
+    return $null
+}
+
+# อัปเดตกลุ่มไฟล์แบบ all-or-nothing: stage ทุกไฟล์ก่อน -> ครบ valid ค่อย commit พร้อมกัน
+# ถ้าขาดตัวใด = ไม่ commit เลย คงชุดเดิม (consistent + live). commit มี .prev rollback กันล้มกลางคัน
+# คืน $true ถ้ากลุ่มอยู่ในสภาพใช้งานได้ (commit ใหม่ทั้งกลุ่ม หรือ คงของเดิมครบทั้งกลุ่ม)
+function Invoke-AtomicGroupUpdate {
+    param(
+        [Parameter(Mandatory=$true)] [string]$GroupName,
+        [Parameter(Mandatory=$true)] [array]$Items
+    )
+
+    Write-Log "Atomic group '$GroupName': staging $($Items.Count) file(s)..." "INFO"
+
+    $staged = @()
+    $allStaged = $true
+    foreach ($it in $Items) {
+        $tmp = Get-StagedDownload -RelPath $it.RelPath -TargetPath $it.TargetPath `
+            -MinBytes $it.MinBytes -EndMarker $it.EndMarker -IsPowerShell $it.IsPowerShell `
+            -GitHubRetries $MaxRetries -RetryDelaySeconds $RetryDelaySeconds `
+            -AbsoluteUrl $it.AbsoluteUrl
+        if ($tmp) {
+            $staged += @{ Tmp = $tmp; Target = $it.TargetPath }
+        } else {
+            $allStaged = $false
+        }
+    }
+
+    if (-not $allStaged) {
+        # ทิ้ง staged ที่ได้มาบางส่วน - ไม่ commit อะไรเลย
+        foreach ($s in $staged) { if (Test-Path $s.Tmp) { Remove-Item $s.Tmp -Force -ErrorAction SilentlyContinue } }
+
+        $missing = @($Items | Where-Object { -not (Test-Path $_.TargetPath) })
+        if ($missing.Count -eq 0) {
+            Write-Log "Group '$GroupName': update incomplete -> keeping existing consistent set (no partial commit)" "WARNING"
+            return $true
+        }
+        Write-Log "Group '$GroupName': FAILED and missing on disk: $(($missing | ForEach-Object { $_.RelPath }) -join ', ')" "ERROR"
+        return $false
+    }
+
+    # ครบทุกไฟล์ valid -> commit พร้อม .prev backup เพื่อ rollback ถ้าล้มกลางคัน
+    $committed = @()   # ไฟล์ที่ move ทับ target สำเร็จแล้ว (สำหรับ rollback)
+    $backups   = @()   # .prev ทุกตัวที่สร้าง (สำหรับเก็บกวาด - track แยกกัน commit สำเร็จหรือไม่)
+    $commitOk = $true
+    foreach ($s in $staged) {
+        $bak = "$($s.Target).prev"
+        $hadBackup = $false
+        try {
+            if (Test-Path $s.Target) {
+                Copy-Item -Path $s.Target -Destination $bak -Force -ErrorAction Stop
+                $backups += $bak
+                $hadBackup = $true
+            }
+            Move-Item -Path $s.Tmp -Destination $s.Target -Force -ErrorAction Stop
+            $committed += @{ Target = $s.Target; Backup = $(if ($hadBackup) { $bak } else { $null }) }
+        } catch {
+            $commitOk = $false
+            Write-Log "Group '$GroupName': COMMIT FAILED for $($s.Target): $($_.Exception.Message)" "ERROR"
+            break
+        }
+    }
+
+    if (-not $commitOk) {
+        # rollback ไฟล์ที่ move ทับไปแล้ว: มี .prev = คืนของเดิม, ไม่มี (target เพิ่งถูกสร้าง) = ลบทิ้งให้กลับเป็นไม่มี
+        foreach ($c in $committed) {
+            if ($c.Backup -and (Test-Path $c.Backup)) {
+                Copy-Item -Path $c.Backup -Destination $c.Target -Force -ErrorAction SilentlyContinue
+                Write-Log "Rolled back $($c.Target) from .prev" "WARNING"
+            } elseif (-not $c.Backup) {
+                Remove-Item -Path $c.Target -Force -ErrorAction SilentlyContinue
+                Write-Log "Rolled back (removed newly-created) $($c.Target)" "WARNING"
+            }
+        }
+        foreach ($s in $staged) { if (Test-Path $s.Tmp) { Remove-Item $s.Tmp -Force -ErrorAction SilentlyContinue } }
+        foreach ($b in $backups) { if (Test-Path $b) { Remove-Item $b -Force -ErrorAction SilentlyContinue } }
+        return $false
+    }
+
+    # commit สำเร็จ - เก็บกวาด .prev ทั้งหมด
+    foreach ($b in $backups) { if (Test-Path $b) { Remove-Item $b -Force -ErrorAction SilentlyContinue } }
+    Write-Log "Group '$GroupName': committed $($committed.Count) file(s) atomically" "SUCCESS"
+    return $true
 }
 
 function Download-AllScripts {
     Write-Log "========================================" "INFO"
-    Write-Log "Downloading scripts from GitHub..." "INFO"
+    Write-Log "Downloading config scripts (file server -> GitHub)..." "INFO"
     Write-Log "========================================" "INFO"
 
-    $AllRequiredDownloaded = $true
-
+    # sysmon-config เป็นไฟล์อิสระ (ไม่ผูกกับ block-malicious/DFIR) -> กลุ่มเดี่ยว
+    # EndMarker '# EOF-SENTINEL-SSJMUK' ต้องคงอยู่ท้ายไฟล์ source เสมอ (ห้ามลบ - ใช้จับ truncation)
+    $items = @()
     foreach ($Script in $ScriptsToDownload) {
-        $GitHubUrl = "$GitHubBaseUrl/$($Script.GitHubPath)"
-        Write-Log "Downloading: $($Script.Name) from $GitHubUrl" "INFO"
-
-        $Result = Download-ScriptFromGitHub `
-            -GitHubUrl  $GitHubUrl `
-            -LocalPath  $Script.LocalPath `
-            -ScriptName $Script.Name `
-            -MaxRetries $MaxRetries `
-            -RetryDelaySeconds $RetryDelaySeconds
-
-        if (-not $Result -and $Script.Required) {
-            $AllRequiredDownloaded = $false
-            Write-Log "Required script '$($Script.Name)' download FAILED" "ERROR"
+        $items += @{
+            RelPath      = $Script.GitHubPath
+            TargetPath   = $Script.LocalPath
+            MinBytes     = 800
+            EndMarker    = '# EOF-SENTINEL-SSJMUK'
+            IsPowerShell = $true
         }
     }
 
-    return $AllRequiredDownloaded
+    return (Invoke-AtomicGroupUpdate -GroupName "config-scripts" -Items $items)
 }
 
 function Invoke-Step4-DownloadActiveResponse {
@@ -444,51 +585,56 @@ function Invoke-Step4-DownloadActiveResponse {
 
     Write-Log "Active Response Path: $ActiveResponsePath" "INFO"
 
-    # Download action-script.bat
-    $ActionScriptUrl  = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
-    $SaveActionScript = Join-Path $ActiveResponsePath "action-script.bat"
-
-    Write-Log "Downloading action-script.bat..." "INFO"
-    try {
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $ActionScriptUrl -OutFile $SaveActionScript -UseBasicParsing -ErrorAction Stop
-        Write-Log "Downloaded action-script.bat ($([math]::Round((Get-Item $SaveActionScript).Length/1KB, 2)) KB)" "SUCCESS"
-    } catch {
-        Write-Log "Failed to download action-script.bat: $($_.Exception.Message)" "ERROR"
-        return $false
-    }
-
-    # Download block-malicious.ps1
-    $BlockMalUrl  = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/wazuh/active-response/bin/block-malicious.ps1"
-    $SaveBlockMal = Join-Path $ActiveResponsePath "block-malicious.ps1"
-
-    Write-Log "Downloading block-malicious.ps1..." "INFO"
-    try {
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $BlockMalUrl -OutFile $SaveBlockMal -UseBasicParsing -ErrorAction Stop
-        Write-Log "Downloaded block-malicious.ps1 ($([math]::Round((Get-Item $SaveBlockMal).Length/1KB, 2)) KB)" "SUCCESS"
-    } catch {
-        Write-Log "Failed to download block-malicious.ps1: $($_.Exception.Message)" "ERROR"
-        return $false
-    }
-
-    # Download Invoke-DFIRCollection.ps1 → C:\install-sysmon\
-    $DFIRScriptUrl  = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/Invoke-DFIRCollection.ps1"
-    $DFIRScriptDir  = "C:\install-sysmon"
-    $SaveDFIRScript = Join-Path $DFIRScriptDir "Invoke-DFIRCollection.ps1"
-
-    Write-Log "Downloading Invoke-DFIRCollection.ps1 to $DFIRScriptDir..." "INFO"
-    try {
-        if (-not (Test-Path $DFIRScriptDir)) {
-            New-Item -ItemType Directory -Path $DFIRScriptDir -Force | Out-Null
-            Write-Log "Created directory: $DFIRScriptDir" "INFO"
+    # action-script.bat = AR entry point ที่ Wazuh เรียกจริง -> ต้อง stage+integrity กัน 200-with-garbage
+    # source คง upstream (cti-misp) ตามเดิม แต่ผ่าน AbsoluteUrl (single source) + integrity check
+    # ไม่ใส่ EndMarker เพราะคุมท้ายไฟล์ upstream ไม่ได้ (MinBytes + HTML-reject จับ error page พอ)
+    $ActionScriptUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
+    $asItems = @(
+        @{
+            RelPath      = "action-script.bat"
+            TargetPath   = (Join-Path $ActiveResponsePath "action-script.bat")
+            MinBytes     = 100
+            EndMarker    = $null
+            IsPowerShell = $false
+            AbsoluteUrl  = $ActionScriptUrl
         }
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $DFIRScriptUrl -OutFile $SaveDFIRScript -UseBasicParsing -ErrorAction Stop
-        Write-Log "Downloaded Invoke-DFIRCollection.ps1 ($([math]::Round((Get-Item $SaveDFIRScript).Length/1KB, 2)) KB)" "SUCCESS"
-    } catch {
-        Write-Log "Failed to download Invoke-DFIRCollection.ps1: $($_.Exception.Message)" "WARNING"
-        # non-critical: block-malicious.ps1 ยังทำงานได้ แค่ DFIR background จะไม่รัน
+    )
+    $asOk = Invoke-AtomicGroupUpdate -GroupName "action-script" -Items $asItems
+    if (-not $asOk) {
+        Write-Log "action-script.bat not in usable state - see log above" "ERROR"
+        return $false
+    }
+
+    # block-malicious.ps1 + Invoke-DFIRCollection.ps1 = coupled pair
+    # (block-malicious launch DFIR เป็น background job -> ห้ามได้เวอร์ชันไม่ตรงกัน)
+    # => atomic group: ครบทั้งคู่ valid ค่อย commit พร้อมกัน, ขาดตัวใด = คงชุดเดิม
+    $DFIRScriptDir  = "C:\install-sysmon"
+    if (-not (Test-Path $DFIRScriptDir)) {
+        New-Item -ItemType Directory -Path $DFIRScriptDir -Force | Out-Null
+        Write-Log "Created directory: $DFIRScriptDir" "INFO"
+    }
+
+    $arItems = @(
+        @{
+            RelPath      = "wazuh/active-response/bin/block-malicious.ps1"
+            TargetPath   = (Join-Path $ActiveResponsePath "block-malicious.ps1")
+            MinBytes     = 8000
+            EndMarker    = 'AR SCRIPT ENDED'          # sentinel เดิมของไฟล์ (ท้าย: Log-Detail ... ENDED) ห้ามลบ
+            IsPowerShell = $true
+        },
+        @{
+            RelPath      = "Invoke-DFIRCollection.ps1"
+            TargetPath   = (Join-Path $DFIRScriptDir "Invoke-DFIRCollection.ps1")
+            MinBytes     = 6000
+            EndMarker    = '# EOF-SENTINEL-SSJMUK'   # ต้องคงท้ายไฟล์ source เสมอ (ห้ามลบ)
+            IsPowerShell = $true
+        }
+    )
+
+    $arOk = Invoke-AtomicGroupUpdate -GroupName "active-response" -Items $arItems
+    if (-not $arOk) {
+        Write-Log "Active Response (block-malicious/DFIR) not in usable state - see log above" "ERROR"
+        return $false
     }
 
     Write-Log "Step 4 completed successfully" "SUCCESS"

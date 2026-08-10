@@ -483,3 +483,5 @@ try {
         Out-File (Join-Path $dfirDir "dfir_summary.json") -Encoding utf8
     Log-Detail "DFIR complete → $dfirDir"
 } catch { Log-Detail "dfir_summary.json failed: $($_.Exception.Message)" }
+
+# EOF-SENTINEL-SSJMUK

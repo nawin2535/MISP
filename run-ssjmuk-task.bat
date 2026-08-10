@@ -14,6 +14,15 @@ if errorlevel 1 (
     exit /b
 )
 
+REM ============================================================================
+REM JITTER: กระจายเวลาไม่ให้ทุกเครื่องดึง GitHub ชน 10:00 พร้อมกัน (กัน HTTP 429)
+REM ต้องอยู่ก่อน GitHub hit แรก (self-update)
+REM Gate ด้วย IsSystem: scheduled task รันเป็น SYSTEM -> jitter ยิง; admin double-click
+REM test รันเป็น user -> skip (ชี้ขาดแน่นอน ไม่ขึ้นกับ session/desktop)
+REM ============================================================================
+PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { $s = Get-Random -Minimum 0 -Maximum 900; Write-Host ('Jitter: sleeping ' + $s + ' sec (anti-429)...'); Start-Sleep -Seconds $s } else { Write-Host 'Not SYSTEM (manual/test) - skipping jitter' }"
+
 REM Configuration
 set SCRIPT_DIR=%~dp0
 set GITHUB_BASE=https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main

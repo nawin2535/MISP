@@ -606,17 +606,17 @@ function Invoke-Step4-DownloadActiveResponse {
     Write-Log "Active Response Path: $ActiveResponsePath" "INFO"
 
     # action-script.bat = AR entry point ที่ Wazuh เรียกจริง -> ต้อง stage+integrity กัน 200-with-garbage
-    # source คง upstream (cti-misp) ตามเดิม แต่ผ่าน AbsoluteUrl (single source) + integrity check
-    # ไม่ใส่ EndMarker เพราะคุมท้ายไฟล์ upstream ไม่ได้ (MinBytes + HTML-reject จับ error page พอ)
-    $ActionScriptUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
+    # ดึงผ่าน pattern มาตรฐาน FileServer -> GitHub(nawin2535) เหมือนไฟล์อื่น
+    # (เดิมผูก AbsoluteUrl ไป cti-misp ตายตัว = วิ่ง GitHub ทุกรอบไม่ผ่าน file server;
+    #  wrapper สั้น content เหมือนกัน verify แล้ว -> ย้ายมา mirror path ปลอดภัย fallback GitHub ได้)
+    # ไม่ใส่ EndMarker เพราะเป็น wrapper สั้น (MinBytes + HTML-reject จับ error page พอ)
     $asItems = @(
         @{
-            RelPath      = "action-script.bat"
+            RelPath      = "wazuh/active-response/bin/action-script.bat"
             TargetPath   = (Join-Path $ActiveResponsePath "action-script.bat")
             MinBytes     = 100
             EndMarker    = $null
             IsPowerShell = $false
-            AbsoluteUrl  = $ActionScriptUrl
         }
     )
     $asOk = Invoke-AtomicGroupUpdate -GroupName "action-script" -Items $asItems

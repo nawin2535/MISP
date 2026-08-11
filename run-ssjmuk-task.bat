@@ -26,6 +26,9 @@ PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
 REM Configuration
 set SCRIPT_DIR=%~dp0
 set GITHUB_BASE=https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main
+REM File server (primary source) - ควรตรงกับ FileServerBaseUrl ใน ssjmuk-task.ps1
+REM ว่าง = ข้าม primary ไป GitHub ตรง. FS ตาย/ช้า = timeout 10s fallback GitHub อัตโนมัติ
+set FILESERVER_BASE=http://cyberupdate-mdo.moph.go.th:19080
 set PS_SCRIPT=%SCRIPT_DIR%ssjmuk-task.ps1
 set MAX_RETRIES=5
 set RETRY_DELAY=10
@@ -35,13 +38,12 @@ REM SELF-UPDATE: Download latest version of this script from GitHub
 REM ============================================================================
 echo Checking for script updates...
 
-set SELF_URL=%GITHUB_BASE%/run-ssjmuk-task.bat
 set SELF_NEW=%SCRIPT_DIR%run-ssjmuk-task.new.bat
 set SELF_CURRENT=%~f0
 
-REM Download latest version เป็นชื่อ .new ก่อน
+REM Download latest .bat: file server primary -> GitHub fallback (size + HTML-page reject)
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri '%SELF_URL%' -OutFile '%SELF_NEW%' -UseBasicParsing -ErrorAction Stop; exit 0 } catch { exit 1 }"
+    "$ProgressPreference='SilentlyContinue'; $dst='%SELF_NEW%'; $fs='%FILESERVER_BASE%'; $gh='%GITHUB_BASE%'; $srcs=@(); if($fs -and $fs -notmatch '<host>'){ $srcs+=,@('FileServer',($fs+'/run-ssjmuk-task.bat'),10) }; $srcs+=,@('GitHub',($gh+'/run-ssjmuk-task.bat'),60); $ok=$false; foreach($s in $srcs){ try{ if(Test-Path $dst){Remove-Item $dst -Force}; Invoke-WebRequest -Uri $s[1] -OutFile $dst -UseBasicParsing -TimeoutSec $s[2] -ErrorAction Stop; $valid=(Test-Path $dst) -and ((Get-Item $dst).Length -gt 1000); if($valid){ $c=Get-Content $dst -Raw; $hd=$c.Substring(0,[Math]::Min(256,$c.Length)); if($hd -match '(?i)<html|<head|<body|Too Many Requests|Rate limit'){$valid=$false} }; if($valid){ Write-Host ('SELF-FETCH-SOURCE: '+$s[0]); $ok=$true; break } }catch{ Write-Host ('  self fetch fail from '+$s[0]) } }; if($ok){exit 0}else{exit 1}"
 
 if %ERRORLEVEL% EQU 0 (
     REM เปรียบเทียบว่าไฟล์ต่างกันไหม
@@ -116,36 +118,23 @@ if errorlevel 1 (
 echo.
 
 REM ============================================================================
-REM Download ssjmuk-task.ps1 from GitHub
+REM Download ssjmuk-task.ps1: file server primary -> GitHub fallback (+ parse-check)
+REM stage .tmp -> integrity (size / HTML-reject / PowerShell parse) -> commit
+REM ไฟล์เสีย/partial ไม่ทับตัวจริง; FS ตาย/ช้า = timeout 10s fallback GitHub อัตโนมัติ
 REM ============================================================================
-set RETRY_COUNT=0
-:DOWNLOAD_RETRY
-set /a RETRY_COUNT+=1
-echo [Attempt %RETRY_COUNT%/%MAX_RETRIES%] Downloading ssjmuk-task.ps1 from GitHub...
+echo Downloading ssjmuk-task.ps1 (file server first, GitHub fallback)...
 
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -Uri '%GITHUB_BASE%/ssjmuk-task.ps1' -OutFile '%PS_SCRIPT%' -UseBasicParsing -ErrorAction Stop; Write-Host 'SUCCESS: Downloaded ssjmuk-task.ps1' -ForegroundColor Green; exit 0 } catch { Write-Host 'ERROR:' $_.Exception.Message -ForegroundColor Red; exit 1 }"
+    "$ProgressPreference='SilentlyContinue'; $dst='%PS_SCRIPT%'; $tmp=$dst+'.tmp'; $fs='%FILESERVER_BASE%'; $gh='%GITHUB_BASE%'; $srcs=@(); if($fs -and $fs -notmatch '<host>'){ $srcs+=,@('FileServer',($fs+'/ssjmuk-task.ps1'),10,1) }; $srcs+=,@('GitHub',($gh+'/ssjmuk-task.ps1'),60,%MAX_RETRIES%); $ok=$false; foreach($s in $srcs){ for($a=1;$a -le $s[3];$a++){ try{ if(Test-Path $tmp){Remove-Item $tmp -Force}; Invoke-WebRequest -Uri $s[1] -OutFile $tmp -UseBasicParsing -TimeoutSec $s[2] -ErrorAction Stop; $valid=$true; if(-not(Test-Path $tmp)){$valid=$false} elseif((Get-Item $tmp).Length -lt 5000){$valid=$false} else{ $c=Get-Content $tmp -Raw; if([string]::IsNullOrWhiteSpace($c)){$valid=$false} else{ $hd=$c.Substring(0,[Math]::Min(512,$c.Length)); if($hd -match '(?i)<html|<head|<body|Too Many Requests|Rate limit'){$valid=$false} else{ $t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseInput($c,[ref]$t,[ref]$e); if($e -and $e.Count -gt 0){$valid=$false} } } }; if($valid){ Move-Item $tmp $dst -Force; Write-Host ('PS-FETCH-SOURCE: '+$s[0]); $ok=$true; break } else{ Write-Host ('  ps integrity fail from '+$s[0]) } }catch{ Write-Host ('  ps fetch fail from '+$s[0]+': '+$_.Exception.Message) }; if($a -lt $s[3]){ Start-Sleep -Seconds %RETRY_DELAY% } }; if($ok){break} }; if($ok){exit 0}else{exit 1}"
 
-set DOWNLOAD_RESULT=%ERRORLEVEL%
-
-if %DOWNLOAD_RESULT% EQU 0 (
-    goto :DOWNLOAD_SUCCESS
-) else (
-    if !RETRY_COUNT! LSS %MAX_RETRIES% (
-        echo Waiting %RETRY_DELAY% seconds before retry...
-        timeout /t %RETRY_DELAY% /nobreak >nul
-        goto :DOWNLOAD_RETRY
-    ) else (
-        echo.
-        echo ============================================================================
-        echo ERROR: Failed to download ssjmuk-task.ps1 after %MAX_RETRIES% attempts
-        echo ============================================================================
-        pause
-        exit /b 1
-    )
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo ============================================================================
+    echo ERROR: Failed to download ssjmuk-task.ps1 from all sources file server + GitHub
+    echo ============================================================================
+    pause
+    exit /b 1
 )
-
-:DOWNLOAD_SUCCESS
 echo.
 echo ============================================================================
 echo Running ssjmuk-task.ps1 with Execution Policy Bypass

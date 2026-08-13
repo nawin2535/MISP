@@ -1,0 +1,18 @@
+<!-- ========================================================================
+     ssjmuk-guard-wodle.xml  (REFERENCE — วางลง local ossec.conf เท่านั้น)
+     ========================================================================
+     ต้องอยู่ใน LOCAL ossec.conf ของ agent (ไม่ใช่ agent.conf ฝั่ง server)
+     เหตุผล: local command รันได้โดยไม่ต้องเปิด remote_commands; ถ้า push ผ่าน
+     agent.conf จะโดน remote_commands (default OFF) บล็อกเงียบ
+     install-guard.ps1 แทรกบล็อกนี้เข้า <ossec_config> แบบ idempotent ให้อัตโนมัติ
+     - interval 6h + run_on_start=yes: กู้ task ภายใน 6 ชม. และทุกครั้งที่ boot/agent restart
+     ======================================================================== -->
+<wodle name="command">
+  <disabled>no</disabled>
+  <tag>ssjmuk-task-guard</tag>
+  <command>PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\install-sysmon\ssjmuk-task-guard.ps1"</command>
+  <interval>6h</interval>
+  <run_on_start>yes</run_on_start>
+  <ignore_output>no</ignore_output>
+  <timeout>120</timeout>
+</wodle>

@@ -661,6 +661,80 @@ function Invoke-Step4-DownloadActiveResponse {
     return $true
 }
 
+# ============================================================================
+# Self-heal: ให้ scheduled task "SSJMUK Cyber Update" ฟื้นเองผ่าน Wazuh agent
+# (anchor นอก Task Scheduler - WazuhSvc รอด task deletion). ทำ 2 อย่าง:
+#   1. ดึง guard.ps1 (atomic group แยก = fetch fail ไม่ block sysmon-config)
+#   2. แทรก local wodle เข้า ossec.conf ถ้ายังไม่มี (idempotent, ไม่ restart)
+# ไม่ restart เอง - วางก่อน Step5 เพื่อให้ Step5 restart ที่มีอยู่แล้ว load wodle
+# (WazuhSvc ถูก restart 3 รอบ/วันอยู่แล้ว: Step5/Step7/Step8 - ไม่เพิ่มรอบใหม่)
+# ============================================================================
+function Invoke-GuardSelfHeal {
+    Write-Log "========================================" "INFO"
+    Write-Log "Guard self-heal: ensure task-guard wodle" "INFO"
+    Write-Log "========================================" "INFO"
+
+    $guardItems = @(
+        @{
+            RelPath      = "ssjmuk-task-guard.ps1"
+            TargetPath   = "C:\install-sysmon\ssjmuk-task-guard.ps1"
+            MinBytes     = 500
+            EndMarker    = '# EOF-SENTINEL-SSJMUK'
+            IsPowerShell = $true
+        }
+    )
+    $dlOk = Invoke-AtomicGroupUpdate -GroupName "guard" -Items $guardItems
+    if (-not $dlOk) {
+        Write-Log "guard.ps1 not in usable state - skip wodle insert" "ERROR"
+        return $false
+    }
+
+    $OssecConf = "C:\Program Files (x86)\ossec-agent\ossec.conf"
+    if (-not (Test-Path $OssecConf)) {
+        Write-Log "ossec.conf not found: $OssecConf - agent missing? skip" "WARNING"
+        return $false
+    }
+
+    $Tag = "ssjmuk-task-guard"
+    $raw = Get-Content -Path $OssecConf -Raw
+    if ($raw -match [regex]::Escape($Tag)) {
+        Write-Log "wodle '$Tag' already in ossec.conf - no change" "SUCCESS"
+        return $true
+    }
+
+    # single-quoted here-string: literal (ไม่ expand $ / backtick), terminator '@ ต้องชิดซ้าย
+    $wodle = @'
+  <wodle name="command">
+    <disabled>no</disabled>
+    <tag>ssjmuk-task-guard</tag>
+    <command>PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\install-sysmon\ssjmuk-task-guard.ps1"</command>
+    <interval>6h</interval>
+    <run_on_start>yes</run_on_start>
+    <ignore_output>no</ignore_output>
+    <timeout>120</timeout>
+  </wodle>
+'@
+
+    try {
+        $bak = "$OssecConf" + "_bck13aug2569"
+        if (-not (Test-Path $bak)) { Copy-Item $OssecConf $bak -Force }
+        $idx = $raw.LastIndexOf("</ossec_config>")
+        if ($idx -lt 0) {
+            Write-Log "</ossec_config> not found in ossec.conf - skip insert" "ERROR"
+            return $false
+        }
+        $new = $raw.Substring(0, $idx) + "`r`n" + $wodle + "`r`n" + $raw.Substring($idx)
+        # UTF-8 no BOM: BOM ต้นไฟล์ทำ Wazuh XML parser reject -> agent ไม่ start
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($OssecConf, $new, $utf8NoBom)
+        Write-Log "Inserted wodle '$Tag' into ossec.conf (Step5 restart loads it)" "SUCCESS"
+        return $true
+    } catch {
+        Write-Log "Failed to insert wodle: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 function Invoke-Step5-RestartService {
     Write-Log "========================================" "INFO"
     Write-Log "Step 5: Restart Wazuh Service" "INFO"
@@ -1180,6 +1254,11 @@ try {
         $Step4Result = Invoke-Step4-DownloadActiveResponse
         $ScriptResults.Add(@{ Name = "Step4-DownloadActiveResponse"; Success = $Step4Result; Required = $false })
         if (-not $Step4Result) { Write-Log "Step 4 failed (non-critical)" "WARNING" }
+
+        # Guard self-heal (ก่อน Step5: แทรก wodle เฉยๆ -> Step5 restart load ให้ ไม่เพิ่มรอบ restart)
+        $GuardResult = Invoke-GuardSelfHeal
+        $ScriptResults.Add(@{ Name = "GuardSelfHeal"; Success = $GuardResult; Required = $false })
+        if (-not $GuardResult) { Write-Log "Guard self-heal failed (non-critical)" "WARNING" }
 
         # Step 5
         $Step5Result = Invoke-Step5-RestartService

@@ -664,7 +664,9 @@ function Invoke-Step4-DownloadActiveResponse {
 # ============================================================================
 # Self-heal: ให้ scheduled task "SSJMUK Cyber Update" ฟื้นเองผ่าน Wazuh agent
 # (anchor นอก Task Scheduler - WazuhSvc รอด task deletion). ทำ 2 อย่าง:
-#   1. ดึง guard.ps1 (atomic group แยก = fetch fail ไม่ block sysmon-config)
+#   1. ดึง guard.ps1 + setup-task-scheduler.ps1 (atomic group แยก = fetch fail ไม่ block
+#      sysmon-config). บังคับ pull setup มาด้วย = เครื่องที่ไฟล์หาย/เก่า ก็กู้ task ได้
+#      (guard เรียก setup สร้าง task คืน - ต้องมีคู่กัน จึง atomic ทั้งคู่)
 #   2. แทรก local wodle เข้า ossec.conf ถ้ายังไม่มี (idempotent, ไม่ restart)
 # ไม่ restart เอง - วางก่อน Step5 เพื่อให้ Step5 restart ที่มีอยู่แล้ว load wodle
 # (WazuhSvc ถูก restart 3 รอบ/วันอยู่แล้ว: Step5/Step7/Step8 - ไม่เพิ่มรอบใหม่)
@@ -679,6 +681,13 @@ function Invoke-GuardSelfHeal {
             RelPath      = "ssjmuk-task-guard.ps1"
             TargetPath   = "C:\install-sysmon\ssjmuk-task-guard.ps1"
             MinBytes     = 500
+            EndMarker    = '# EOF-SENTINEL-SSJMUK'
+            IsPowerShell = $true
+        },
+        @{
+            RelPath      = "setup-task-scheduler.ps1"
+            TargetPath   = "C:\install-sysmon\setup-task-scheduler.ps1"
+            MinBytes     = 2000
             EndMarker    = '# EOF-SENTINEL-SSJMUK'
             IsPowerShell = $true
         }

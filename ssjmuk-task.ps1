@@ -744,6 +744,54 @@ function Invoke-GuardSelfHeal {
     }
 }
 
+# CA trust deploy: ดึง FortiGate deep-inspection CA + import เข้า Trusted Root
+# ไม่ต้อง restart service (CA มีผลทันที ต่างจาก guard ที่รอ Step5)
+# .cer = public cert (ไม่ลับ), Install-FortiGateCA.ps1 verify CA:TRUE + idempotent by thumbprint
+function Invoke-CATrustDeploy {
+    Write-Log "========================================" "INFO"
+    Write-Log "CA trust: ensure FortiGate deep-inspection CA installed" "INFO"
+    Write-Log "========================================" "INFO"
+
+    $caItems = @(
+        @{
+            RelPath      = "Install-FortiGateCA.ps1"
+            TargetPath   = "C:\install-sysmon\Install-FortiGateCA.ps1"
+            MinBytes     = 1500
+            EndMarker    = '# EOF-SENTINEL-SSJMUK'
+            IsPowerShell = $true
+        },
+        @{
+            RelPath      = "Fortinet_CA_SSL.cer"
+            TargetPath   = "C:\install-sysmon\Fortinet_CA_SSL.cer"
+            MinBytes     = 1000
+            EndMarker    = '-----END CERTIFICATE-----'   # PEM end = truncation guard
+            IsPowerShell = $false
+        }
+    )
+    $dlOk = Invoke-AtomicGroupUpdate -GroupName "ca-trust" -Items $caItems
+    if (-not $dlOk) {
+        Write-Log "CA files not in usable state - skip import" "ERROR"
+        return $false
+    }
+
+    $installer = "C:\install-sysmon\Install-FortiGateCA.ps1"
+    $cert      = "C:\install-sysmon\Fortinet_CA_SSL.cer"
+    try {
+        $out = & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -CertPath $cert 2>&1
+        $rc = $LASTEXITCODE
+        foreach ($line in $out) { if ("$line".Trim()) { Write-Log "  [CA] $line" "INFO" } }
+        if ($rc -eq 0) {
+            Write-Log "CA trust ensured (installer exit 0)" "SUCCESS"
+            return $true
+        }
+        Write-Log "CA installer exit $rc - CA not trusted (check .cer is a CA cert)" "WARNING"
+        return $false
+    } catch {
+        Write-Log "CA install failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 function Invoke-Step5-RestartService {
     Write-Log "========================================" "INFO"
     Write-Log "Step 5: Restart Wazuh Service" "INFO"
@@ -1268,6 +1316,11 @@ try {
         $GuardResult = Invoke-GuardSelfHeal
         $ScriptResults.Add(@{ Name = "GuardSelfHeal"; Success = $GuardResult; Required = $false })
         if (-not $GuardResult) { Write-Log "Guard self-heal failed (non-critical)" "WARNING" }
+
+        # CA trust deploy (independent of Step5 - CA มีผลทันที ไม่ต้อง restart)
+        $CAResult = Invoke-CATrustDeploy
+        $ScriptResults.Add(@{ Name = "CATrustDeploy"; Success = $CAResult; Required = $false })
+        if (-not $CAResult) { Write-Log "CA trust deploy failed (non-critical)" "WARNING" }
 
         # Step 5
         $Step5Result = Invoke-Step5-RestartService

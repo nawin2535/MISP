@@ -61,6 +61,9 @@ $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หร
 # Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
 $script:JitterInfo = $null
 
+# CA trust: สถานะติดตั้ง CA (installed / already trusted / failed) สำหรับแสดงใน Discord summary
+$script:CATrustInfo = $null
+
 # นับ source ที่ดึงไฟล์สำเร็จ (FileServer/GitHub/Upstream) เพื่อโชว์ใน Discord summary
 $script:FetchSources = @{}
 
@@ -122,6 +125,10 @@ function Send-DiscordSummary {
         # เพิ่ม version info สำหรับ Step 7
         if ($_.Name -eq "Step7-UpgradeWazuhAgent" -and $script:WazuhVersionInfo) {
             $line += " [$script:WazuhVersionInfo]"
+        }
+        # เพิ่มสถานะติดตั้ง CA (installed / already trusted / failed)
+        if ($_.Name -eq "CATrustDeploy" -and $script:CATrustInfo) {
+            $line += " [$script:CATrustInfo]"
         }
         $line
     }
@@ -770,6 +777,7 @@ function Invoke-CATrustDeploy {
     )
     $dlOk = Invoke-AtomicGroupUpdate -GroupName "ca-trust" -Items $caItems
     if (-not $dlOk) {
+        $script:CATrustInfo = "download failed"
         Write-Log "CA files not in usable state - skip import" "ERROR"
         return $false
     }
@@ -779,14 +787,20 @@ function Invoke-CATrustDeploy {
     try {
         $out = & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -CertPath $cert 2>&1
         $rc = $LASTEXITCODE
+        $outText = ($out | Out-String)
         foreach ($line in $out) { if ("$line".Trim()) { Write-Log "  [CA] $line" "INFO" } }
         if ($rc -eq 0) {
-            Write-Log "CA trust ensured (installer exit 0)" "SUCCESS"
+            if ($outText -match 'already present')          { $script:CATrustInfo = 'already trusted' }
+            elseif ($outText -match 'SUCCESS: CA installed') { $script:CATrustInfo = 'installed' }
+            else                                             { $script:CATrustInfo = 'ensured' }
+            Write-Log "CA trust ensured ($script:CATrustInfo)" "SUCCESS"
             return $true
         }
+        $script:CATrustInfo = "failed (exit $rc)"
         Write-Log "CA installer exit $rc - CA not trusted (check .cer is a CA cert)" "WARNING"
         return $false
     } catch {
+        $script:CATrustInfo = "error"
         Write-Log "CA install failed: $($_.Exception.Message)" "ERROR"
         return $false
     }

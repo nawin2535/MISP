@@ -253,8 +253,18 @@ function Send-DiscordSummary {
 #region Functions
 function Test-InternetConnection {
     param([int]$TimeoutSeconds = 5)
+    # Primary: FileServer over HTTP (แหล่ง update จริง; plain HTTP ไม่โดน SSL-inspect
+    # -> ผ่านได้แม้เครื่องยังไม่มี CA ใต้ deep-inspection). กัน false "no internet"
+    # ที่เคยทำ task deadlock ก่อน CATrustDeploy จะลง CA ได้
+    if ($FileServerBaseUrl -and ($FileServerBaseUrl.Trim() -ne "") -and ($FileServerBaseUrl -notmatch '<host>')) {
+        try {
+            Invoke-WebRequest -Uri "$FileServerBaseUrl/run-ssjmuk-task.bat" -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop | Out-Null
+            return $true
+        } catch { }
+    }
+    # Fallback: HTTPS (ต้องมี CA ถ้าอยู่ใต้ deep-inspection)
     try {
-        $Response = Invoke-WebRequest -Uri "https://www.google.com" -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri "https://www.google.com" -Method Head -TimeoutSec $TimeoutSeconds -UseBasicParsing -ErrorAction Stop | Out-Null
         return $true
     } catch {
         Write-Log "Internet connection test failed: $_" "WARNING"
@@ -1299,6 +1309,13 @@ try {
 
     } else {
 
+        # CA trust deploy FIRST - ต้องลง FortiGate CA ก่อนทุก HTTPS
+        # บนเครื่องที่ deep-inspect + ยังไม่มี CA, HTTPS ทุกตัวจะ fail (cert ไม่ trust)
+        # CATrustDeploy โหลดไฟล์ผ่าน FileServer HTTP จึงทำงานได้ก่อนมี CA -> ลง CA -> HTTPS ที่เหลือผ่าน
+        $CAResult = Invoke-CATrustDeploy
+        $ScriptResults.Add(@{ Name = "CATrustDeploy"; Success = $CAResult; Required = $false })
+        if (-not $CAResult) { Write-Log "CA trust deploy failed (non-critical)" "WARNING" }
+
         # Run scripts
         foreach ($Script in $ScriptsToRun) {
             Write-Log "Processing: $($Script.Name)" "INFO"
@@ -1330,11 +1347,6 @@ try {
         $GuardResult = Invoke-GuardSelfHeal
         $ScriptResults.Add(@{ Name = "GuardSelfHeal"; Success = $GuardResult; Required = $false })
         if (-not $GuardResult) { Write-Log "Guard self-heal failed (non-critical)" "WARNING" }
-
-        # CA trust deploy (independent of Step5 - CA มีผลทันที ไม่ต้อง restart)
-        $CAResult = Invoke-CATrustDeploy
-        $ScriptResults.Add(@{ Name = "CATrustDeploy"; Success = $CAResult; Required = $false })
-        if (-not $CAResult) { Write-Log "CA trust deploy failed (non-critical)" "WARNING" }
 
         # Step 5
         $Step5Result = Invoke-Step5-RestartService

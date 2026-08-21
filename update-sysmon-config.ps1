@@ -6,10 +6,19 @@
 # ============================================================================
 
 #region Configuration
-$ConfigUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/sysmonconfig-export-v2.xml"
+# FileServer primary (HTTP internal, เปิดตลอด) -> GitHub fallback (firewall เปิด ~10:00 เท่านั้น)
+# ที่ผ่านมา GitHub-only ทำ task ที่รันก่อน 10:00 fail เพราะ GitHub ถูก block ตอนนั้น
+$XmlRelPath     = "sysmonconfig-export-v2.xml"
+$FileServerBase = "http://cyberupdate-mdo.moph.go.th:19080"
+$GitHubBase     = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main"
+$ConfigSources  = @(
+    @{ Name = "FileServer"; Url = "$FileServerBase/$XmlRelPath" },
+    @{ Name = "GitHub";     Url = "$GitHubBase/$XmlRelPath" }
+)
 $TempDir = "C:\temp"
 $LocalXml = Join-Path $TempDir "sysmonconfig-export-v2.xml"
 $SysmonExe = "Sysmon.exe"
+$MinXmlBytes = 2000   # XML จริง ~180KB; ต่ำกว่านี้ = error page/truncated -> reject
 #endregion
 
 #region Functions
@@ -25,6 +34,20 @@ function Test-SysmonInstalled {
 function Test-AdminPrivileges {
     $CurrentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $CurrentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-SysmonXml {
+    # ยืนยันไฟล์ที่โหลดมาเป็น Sysmon config จริง (กัน error page / truncated / rate-limit HTML)
+    param([string]$Path, [int]$MinBytes = 2000)
+    if (-not (Test-Path $Path)) { return $false }
+    if ((Get-Item $Path).Length -lt $MinBytes) { return $false }
+    $raw = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $false }
+    $head = $raw.Substring(0, [Math]::Min(512, $raw.Length))
+    if ($head -match '(?i)<!DOCTYPE html|<html|Too Many Requests|Rate limit') { return $false }
+    try { [void][xml]$raw } catch { return $false }   # ต้อง well-formed XML
+    if ($raw -notmatch '(?i)<Sysmon') { return $false }  # ต้องมี root <Sysmon ...>
+    return $true
 }
 #endregion
 
@@ -48,22 +71,33 @@ try {
         Write-Output "Created temp directory: $TempDir"
     }
     
-    # Download latest configuration
-    Write-Output "Downloading latest Sysmon configuration from: $ConfigUrl"
-    try {
-        $ProgressPreference = 'SilentlyContinue' # Suppress progress bar for cleaner output
-        Invoke-WebRequest -Uri $ConfigUrl -OutFile $LocalXml -UseBasicParsing -ErrorAction Stop
-        
-        if (Test-Path $LocalXml) {
-            $FileSize = (Get-Item $LocalXml).Length
-            Write-Output "Successfully downloaded configuration file ($([math]::Round($FileSize/1KB, 2)) KB)"
-        } else {
-            Write-Output "ERROR: Download completed but file not found at: $LocalXml"
-            exit 1
+    # Download latest configuration: FileServer primary -> GitHub fallback (+validate)
+    $Downloaded = $false
+    foreach ($src in $ConfigSources) {
+        Write-Output "Downloading Sysmon configuration from $($src.Name): $($src.Url)"
+        $Tmp = "$LocalXml.tmp"
+        Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
+        try {
+            $ProgressPreference = 'SilentlyContinue' # Suppress progress bar for cleaner output
+            Invoke-WebRequest -Uri $src.Url -OutFile $Tmp -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        } catch {
+            Write-Output "  $($src.Name) download failed: $($_.Exception.Message)"
+            Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
+            continue
         }
-    } catch {
-        Write-Output "ERROR: Failed to download configuration: $_"
-        Write-Output "Exception: $($_.Exception.Message)"
+        if (Test-SysmonXml -Path $Tmp -MinBytes $MinXmlBytes) {
+            Move-Item $Tmp $LocalXml -Force
+            $FileSize = (Get-Item $LocalXml).Length
+            Write-Output "  Validated Sysmon config from $($src.Name) ($([math]::Round($FileSize/1KB, 2)) KB)"
+            $Downloaded = $true
+            break
+        } else {
+            Write-Output "  $($src.Name) content invalid (not well-formed Sysmon XML / too small) - trying next source"
+            Remove-Item $Tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $Downloaded) {
+        Write-Output "ERROR: Could not obtain a valid Sysmon config from any source (FileServer/GitHub)"
         exit 1
     }
     

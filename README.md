@@ -145,6 +145,6 @@ Developed by SSJMUK Cyber Team
 
 ## Wazuh install on Client (First step)
 ---
-Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.5-1.msi -OutFile $env:tmp\wazuh-agent; msiexec.exe /i $env:tmp\wazuh-agent /q WAZUH_MANAGER='wazuhserver-mdo.moph.go.th' WAZUH_REGISTRATION_PASSWORD='xxx' WAZUH_AGENT_GROUP='xxx' WAZUH_AGENT_NAME='xxx'
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.7-1.msi -OutFile $env:tmp\wazuh-agent; msiexec.exe /i $env:tmp\wazuh-agent /q WAZUH_MANAGER='wazuhserver-mdo.moph.go.th' WAZUH_REGISTRATION_PASSWORD='xxx' WAZUH_AGENT_GROUP='xxx,xxx' WAZUH_AGENT_NAME='xxx'
 ---
 PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File "v1_AgentInstallScript-sysmon-wazuh-activeresponse.ps1"

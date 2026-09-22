@@ -1,4 +1,4 @@
-################################
+﻿################################
 ## Wazuh Active Response (FINAL) - MISP + Sysmon(1,3,6,7,15,22,26,29) + FIM
 ## Watchdog-aware containment (signature-gated) + DFIR collection (background job)
 ## v36 5aug2569: Authenticode gate + BYOVD carve-out + takeown/sdset + Confirm-IocFile
@@ -11,6 +11,70 @@ function Log-Detail {
     param([string]$msg)
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     "$timestamp - $msg" | Out-File -FilePath $logFile -Append -Encoding utf8
+}
+
+function Normalize-AlertPath {
+    # 22ก.ย.69: path ที่มากับ alert ของ Wazuh มี backslash ซ้อน (C:\\Windows\\..)
+    # ทำให้การเทียบ StartsWith() ทุกจุดไม่ติด (DFIR loop guard / protected path)
+    # (?<!^) กัน UNC path \\server\share ไม่ให้ถูกยุบ
+    param([string]$p)
+    if ([string]::IsNullOrWhiteSpace($p)) { return "" }
+    return ($p -replace '(?<!^)\\{2,}', '\')
+}
+
+function Log-ARJson {
+    # 22ก.ย.69 - เขียน "บรรทัดเดียว" รูปแบบมาตรฐาน Wazuh เพื่อให้ decoder ar_log_json อ่านได้
+    # ทำให้ alert ฝั่ง SIEM เห็นบริบทครบ (กฎไหน เครื่องไหน ไฟล์อะไร ค่าแฮชอะไร)
+    # เทียบเท่าที่ kong-block ได้จาก execd -- custom script ต้องเขียนเอง
+    param($Cmd, $Alert, $Program)
+    try {
+        $cmdStr = "add"
+        if ($Cmd) { $cmdStr = "$Cmd" }
+        # ชื่อโปรแกรมต้องมาจากที่ execd ส่งมา (= <executable> ใน ossec.conf = action-script.bat)
+        # ไม่ hardcode เป็น block-malicious.ps1 เพราะ AR command ที่ประกาศไว้คือ action-script
+        $prog = "active-response/bin/action-script.bat"
+        if ($Program) { $prog = "$Program" }
+        $ev = $Alert.data.win.eventdata
+        $ctx = [ordered]@{
+            version    = 1
+            origin     = [ordered]@{ name = ""; module = "wazuh-execd" }
+            command    = $cmdStr
+            parameters = [ordered]@{
+                extra_args = @()
+                program    = $prog
+                alert      = [ordered]@{
+                    rule     = [ordered]@{
+                        id          = "$($Alert.rule.id)"
+                        level       = "$($Alert.rule.level)"
+                        description = "$($Alert.rule.description)"
+                    }
+                    agent    = [ordered]@{
+                        id   = "$($Alert.agent.id)"
+                        name = "$($Alert.agent.name)"
+                    }
+                    data     = [ordered]@{ win = [ordered]@{ eventdata = [ordered]@{
+                        targetFilename = "$($ev.targetFilename)"
+                        image          = "$($ev.image)"
+                        imageLoaded    = "$($ev.imageLoaded)"
+                        hashes         = "$($ev.hashes)"
+                        hash           = "$($ev.hash)"
+                        queryName      = "$($ev.queryName)"
+                    } } }
+                    syscheck = [ordered]@{
+                        path         = "$($Alert.syscheck.path)"
+                        sha256_after = "$($Alert.syscheck.sha256_after)"
+                    }
+                }
+            }
+        }
+        $json = $ctx | ConvertTo-Json -Compress -Depth 9
+        $json = $json -replace "`r", " " -replace "`n", " "
+        $ts   = Get-Date -Format 'yyyy/MM/dd HH:mm:ss'
+        ($ts + " " + $prog + ": " + $json) |
+            Out-File -FilePath $logFile -Append -Encoding utf8
+    } catch {
+        Log-Detail "Log-ARJson failed: $($_.Exception.Message)"
+    }
 }
 
 function Start-DFIRBackground {
@@ -34,6 +98,25 @@ function Start-DFIRBackground {
         $tmpFile = Join-Path $tmpDir "alert_${ts}.json"
         $AlertJson | Out-File -FilePath $tmpFile -Encoding utf8 -Force
 
+        # 22ก.ย.69 FIX (DFIR race): DFIR รันเป็น background job แต่ Invoke-Containment
+        # ลบไฟล์ทันทีใน foreground -> DFIR มาถึงตอน Test-Path=false จึงไม่ได้หลักฐานตัวจริง
+        # แก้: สำเนาไฟล์เป้าหมาย "แบบ synchronous" ไว้ก่อน (ไฟล์เดียว เร็ว)
+        # ส่วนงานช้า (process list/network/sysmon) ยังเป็น background เหมือนเดิม
+        $preserved = ""
+        try {
+            $tf = "$TargetFile" -replace '(?<!^)\\{2,}', '\'
+            if ($tf -and (Test-Path -LiteralPath $tf) -and -not $tf.ToLower().StartsWith("c:\install-sysmon\dfir-")) {
+                $tfItem = Get-Item -LiteralPath $tf -ErrorAction Stop
+                if ($tfItem.Length -le 209715200) {
+                    $preserved = Join-Path $tmpDir ("preserved_${ts}_" + [System.IO.Path]::GetFileName($tf))
+                    Copy-Item -LiteralPath $tf -Destination $preserved -Force -ErrorAction Stop
+                    Log-Detail "DFIR: preserved target before containment -> $preserved"
+                } else {
+                    Log-Detail "DFIR: skip preserve (ไฟล์ใหญ่เกิน 200MB): $tf"
+                }
+            }
+        } catch { Log-Detail "DFIR: preserve failed: $($_.Exception.Message)"; $preserved = "" }
+
         $argList = "-NonInteractive -NoProfile -ExecutionPolicy Bypass" +
             " -File `"$dfirScript`"" +
             " -EventType `"$EventType`"" +
@@ -41,6 +124,7 @@ function Start-DFIRBackground {
             " -IOCType `"$IOCType`"" +
             " -AlertFile `"$tmpFile`"" +
             " -TargetFile `"$TargetFile`"" +
+            " -PreservedFile `"$preserved`"" +
             " -ProcessImage `"$ProcessImage`"" +
             " -ProcessId `"$ProcessId`"" +
             " -ParentImage `"$ParentImage`"" +
@@ -76,6 +160,7 @@ $protectedSystemPaths = @(
 function Test-ProtectedSystemFile {
     param([string]$path)
     if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    $path = $path -replace '(?<!^)\\{2,}', '\'   # 22ก.ย.69: กัน backslash ซ้อนทำให้เทียบ prefix ไม่ติด
     $lp = $path.ToLower()
     try {
         if (-not (Test-Path -LiteralPath $path)) {
@@ -394,18 +479,23 @@ try {
 $command = $INPUT_ARRAY.command
 $alert   = $INPUT_ARRAY.parameters.alert
 
+# 22ก.ย.69 - บันทึกบริบทของ AR ให้ SIEM เห็น (ต้องอยู่ก่อน GUARD ทุกตัว
+# เพื่อให้แม้กรณี early exit ก็ยังมีหลักฐานว่า AR ถูกสั่งด้วยเหตุใด)
+Log-ARJson $command $alert $INPUT_ARRAY.parameters.program
+
 # GUARD 25may2569: prevent AR loop — early exit if alert points at a file
 # already inside our own dfir-found collection folder. Sysmon Event 11/29
 # fires on every DFIR copy (same hash); without this guard the AR re-triggers
 # Invoke-DFIRCollection.ps1, which copies the file again with _DFIR_COPY suffix,
 # infinitely.
-$dfirRootGuard = "C:\install-sysmon\dfir-found"
-$guardCandidates = @(
-    $alert.data.win.eventdata.targetFilename,
-    $alert.data.win.eventdata.image,
-    $alert.data.win.eventdata.imageLoaded,
-    $alert.syscheck.path
-) | Where-Object { $_ }
+# 22ก.ย.69: ขยายจาก dfir-found -> "dfir-" เพื่อครอบ dfir-tmp (ที่เก็บสำเนา preserved) ด้วย
+# มิฉะนั้นสำเนาหลักฐานจะถูก AR รอบถัดไปลบทิ้ง และเกิด loop
+$dfirRootGuard = "C:\install-sysmon\dfir-"
+$npTarget = Normalize-AlertPath $alert.data.win.eventdata.targetFilename
+$npImage  = Normalize-AlertPath $alert.data.win.eventdata.image
+$npLoaded = Normalize-AlertPath $alert.data.win.eventdata.imageLoaded
+$npSysck  = Normalize-AlertPath $alert.syscheck.path
+$guardCandidates = @($npTarget, $npImage, $npLoaded, $npSysck) | Where-Object { $_ }
 foreach ($_gp in $guardCandidates) {
     if ($_gp.ToLower().StartsWith($dfirRootGuard.ToLower())) {
         Log-Detail "EARLY EXIT: alert targets file inside dfir-found ($_gp) - skipping to prevent AR loop"
@@ -417,7 +507,24 @@ foreach ($_gp in $guardCandidates) {
 # genuine Windows binaries (gcapi.dll 19 may, SysWOW64\rundll32.exe 25 may). If
 # such a hash matches a signed OS file, refuse and exit. Unsigned masquerade
 # files under a system path fall through to normal containment.
-foreach ($_gp in $guardCandidates) {
+# 22ก.ย.69 FIX: เดิม guard นี้วน $guardCandidates ซึ่งรวม eventdata.image
+# แต่ Event 15/26/29 นั้น image = โปรเซสผู้กระทำ (เช่น Explorer.EXE, cmd.exe) ไม่ใช่เป้าหมาย
+# ทำให้ไฟล์อันตรายที่ถูกสร้างโดยโปรแกรมระบบที่เซ็นถูกต้อง รอดจากการกำจัดทุกครั้ง
+# -> ตรวจเฉพาะ path ที่เป็น "เป้าหมายของ IoC" ตามชนิดเหตุการณ์
+# (ไฟล์ระบบยังถูกปกป้องอีก 3 ชั้นที่จุดลงมือจริง: Remove-FileHard / kill cluster / service removal)
+$evForGuard = "$($alert.data.win.system.eventID)"
+switch ($evForGuard) {
+    "1"     { $iocTargetCandidates = @($npImage) }
+    "6"     { $iocTargetCandidates = @($npLoaded) }
+    "7"     { $iocTargetCandidates = @($npLoaded) }
+    "15"    { $iocTargetCandidates = @($npTarget) }
+    "26"    { $iocTargetCandidates = @($npTarget) }
+    "29"    { $iocTargetCandidates = @($npTarget) }
+    default { $iocTargetCandidates = $guardCandidates }
+}
+$iocTargetCandidates = @($iocTargetCandidates + @($npSysck)) | Where-Object { $_ }
+Log-Detail "Authenticode gate scope (EventID=$evForGuard): $($iocTargetCandidates -join ' | ')"
+foreach ($_gp in $iocTargetCandidates) {
     if (Test-ProtectedSystemFile $_gp) {
         Log-Detail "EARLY EXIT (protected signed system file): $_gp - refusing kill/delete"
         exit 0

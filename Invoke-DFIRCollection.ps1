@@ -1,4 +1,4 @@
-################################
+﻿################################
 ## DFIR Collection Script (Background)
 ## รันแยกจาก block-malicious.ps1 เป็น background job
 ## ไม่ block Wazuh active response
@@ -9,6 +9,7 @@ param(
     [string]$IOCType,
     [string]$AlertFile,       # path ของ temp JSON file ที่ main script บันทึกไว้
     [string]$TargetFile = "",
+    [string]$PreservedFile = "",   # 22ก.ย.69: สำเนาที่ block-malicious เก็บไว้ก่อน containment ลบ
     [string]$ProcessImage = "",
     [string]$ProcessId = "",
     [string]$ParentImage = "",
@@ -19,6 +20,15 @@ param(
 
 $logFile  = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
 $dfirRoot = "C:\install-sysmon\dfir-found"
+
+# 22ก.ย.69 FIX: path จาก alert ของ Wazuh มาเป็น backslash ซ้อน (C:\\Windows\\..)
+# ทำให้ StartsWith() เทียบ prefix ไม่ติด -> ตัวกรอง system binary ไม่ทำงาน
+# -> copy Explorer.EXE / powershell.exe มาเก็บโดยไม่จำเป็น
+# (?<!^) กัน UNC path \\server\share ไม่ให้ถูกยุบ
+$TargetFile    = "$TargetFile"    -replace '(?<!^)\\{2,}', '\'
+$PreservedFile = "$PreservedFile" -replace '(?<!^)\\{2,}', '\'
+$ProcessImage  = "$ProcessImage"  -replace '(?<!^)\\{2,}', '\'
+$ParentImage   = "$ParentImage"   -replace '(?<!^)\\{2,}', '\'
 
 function Log-Detail {
     param([string]$msg)
@@ -91,7 +101,16 @@ $sysBinaryPaths = @(
     "C:\Windows\assembly"
 )
 
-foreach ($fp in @($TargetFile, $ProcessImage) | Where-Object { $_ -and (Test-Path $_) }) {
+# 22ก.ย.69 FIX (DFIR race): ถ้า containment ลบไฟล์เป้าหมายไปก่อนแล้ว
+# ให้ใช้สำเนาที่ block-malicious.ps1 เก็บไว้แบบ synchronous ก่อนลบแทน
+$TargetFileForCopy = $TargetFile
+if ($TargetFile -and -not (Test-Path -LiteralPath $TargetFile) -and
+    $PreservedFile -and (Test-Path -LiteralPath $PreservedFile)) {
+    $TargetFileForCopy = $PreservedFile
+    Log-Detail "ใช้สำเนาที่เก็บไว้ก่อน containment (ไฟล์เดิมถูกลบแล้ว): $TargetFile"
+}
+
+foreach ($fp in @($TargetFileForCopy, $ProcessImage) | Where-Object { $_ -and (Test-Path $_) }) {
     # GUARD 25may2569: prevent infinite loop — never copy a file that is already
     # inside dfir-found (would create <name>_DFIR_COPY_DFIR_COPY... and re-trigger
     # Sysmon Event 11/29 on the copy)
@@ -475,6 +494,7 @@ try {
         ioc_value      = $IOCValue
         ioc_type       = $IOCType
         target_file    = $TargetFile
+        preserved_file = $PreservedFile
         process_image  = $ProcessImage
         process_id     = $ProcessId
         parent_image   = $ParentImage

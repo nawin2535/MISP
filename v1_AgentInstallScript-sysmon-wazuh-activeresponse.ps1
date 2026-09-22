@@ -148,7 +148,8 @@ $ActiveResponsePath = "${SystemDrive}:\Program Files (x86)\ossec-agent\active-re
 ## $ActiveResponsePath = "C:\Program Files (x86)\ossec-agent\active-response\bin"
 
 # Define action-script file download URL
-$ActionScriptUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
+## $ActionScriptUrl = "https://raw.githubusercontent.com/cti-misp/MISP/refs/heads/main/active-response/action-script.bat"
+$ActionScriptUrl = "https://raw.githubusercontent.com/nawin2535/MISP/refs/heads/main/wazuh/active-response/bin/action-script.bat"
 $SaveActionScriptPath = "${ActiveResponsePath}\action-script.bat"
 
 # Download Sysmon configuration file

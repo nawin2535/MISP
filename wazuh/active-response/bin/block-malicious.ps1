@@ -156,7 +156,8 @@ $protectedSystemPaths = @(
 # ผู้ลงนาม (CN ของ Authenticode) ในรายการนี้ไม่ถูกปกป้อง "เฉพาะ PupMode" เท่านั้น ; ยกเว้นรายเครื่องทำที่ rule
 # ฝั่ง manager (pup_installer_rules.xml rule 110050/110051) ไม่ใช่ที่นี่
 $pupSigners = @('WPS SOFTWARE PTE. LTD.')
-$pupInstallerPattern = '(?i)(\\wps_office_inst[^\\]*\.exe|\\ProgramData\\WPS\\Installers\\[^\\]+\.exe)$'
+# stub มีหลายชื่อ: wps_office_inst.exe (28 ต.ค.) / wps_wid.cid-<n>.<n>.exe (9 ต.ค.) ; ตัวเต็มลง Installers เสมอ
+$pupInstallerPattern = '(?i)(\\(wps_office_inst|wps_wid\.cid-)[^\\]*\.exe|\\ProgramData\\WPS\\Installers\\[^\\]+\.exe)$'
 $script:PupMode = $false
 
 # Should we REFUSE to delete this file? $true = protect. Decide by Authenticode:

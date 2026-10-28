@@ -2,6 +2,7 @@
 ## Wazuh Active Response (FINAL) - MISP + Sysmon(1,3,6,7,15,22,26,29) + FIM
 ## Watchdog-aware containment (signature-gated) + DFIR collection (background job)
 ## v36 5aug2569: Authenticode gate + BYOVD carve-out + takeown/sdset + Confirm-IocFile
+## v37 28oct2569: PUP installer mode (WPS) - signer carve-out + target-only containment
 ################################
 
 $logFile    = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
@@ -151,6 +152,13 @@ $protectedSystemPaths = @(
     "C:\Program Files (x86)\ossec-agent\"
 )
 
+# v37 28ต.ค.69: PUP ที่องค์กรห้ามใช้ แต่ signed ถูกต้อง -> gate ปกป้องไว้ และ hash เปลี่ยนทุก build
+# ผู้ลงนาม (CN ของ Authenticode) ในรายการนี้ไม่ถูกปกป้อง "เฉพาะ PupMode" เท่านั้น ; ยกเว้นรายเครื่องทำที่ rule
+# ฝั่ง manager (pup_installer_rules.xml rule 110050/110051) ไม่ใช่ที่นี่
+$pupSigners = @('WPS SOFTWARE PTE. LTD.')
+$pupInstallerPattern = '(?i)(\\wps_office_inst[^\\]*\.exe|\\ProgramData\\WPS\\Installers\\[^\\]+\.exe)$'
+$script:PupMode = $false
+
 # Should we REFUSE to delete this file? $true = protect. Decide by Authenticode:
 # validly signed -> protect (a contaminated feed can't make us delete a real OS
 # binary; also shields signed apps from FP removal). Unsigned/tampered -> allow
@@ -169,6 +177,10 @@ function Test-ProtectedSystemFile {
         }
         $sig = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
         if ($sig.Status -eq 'Valid') {
+            if ($script:PupMode -and $sig.SignerCertificate -and $sig.SignerCertificate.Subject -match '(?:^|,\s*)CN="?([^,"]+)' -and $pupSigners -contains $Matches[1].Trim()) {
+                Log-Detail "NOT protected: PUP signer '$($Matches[1].Trim())' $path - allowing removal (PupMode)"
+                return $false
+            }
             if ([System.IO.Path]::GetExtension($lp) -eq '.sys' -and -not ($lp.Contains('\system32\drivers\') -or $lp.Contains('\system32\driverstore\'))) {
                 Log-Detail "NOT protected: validly-signed .sys outside driver store (BYOVD) $path - allowing removal"
                 return $false
@@ -340,8 +352,9 @@ function Invoke-Containment {
         # system/app root, dir-scoped process-kill and service-sweep would hit the whole
         # OS, so restrict to the single alerted file. Narrow (masquerade sub)dirs like
         # System32\Microsoft still get the full watchdog sweep.
-        $broadDir = Test-BroadSystemDir $dir
-        Log-Detail "CONTAINMENT start: target=$TargetFile dir=$dir broadDir=$broadDir"
+        # v37 PupMode: dir มักเป็น Downloads ของผู้ใช้ -> kill/ลบเฉพาะไฟล์นี้ ไม่กวาดโปรแกรมอื่นในโฟลเดอร์
+        $broadDir = (Test-BroadSystemDir $dir) -or $script:PupMode
+        Log-Detail "CONTAINMENT start: target=$TargetFile dir=$dir broadDir=$broadDir pup=$($script:PupMode)"
 
         # 1. services whose ImagePath references target/dir. Full-path match only (never
         # bare filename - masquerade reuses names like SearchIndexer.exe); normalize
@@ -502,6 +515,14 @@ foreach ($_gp in $guardCandidates) {
         exit 0
     }
 }
+
+# v37 PupMode: rule 110050/110051 (group pup_installer) หรือ rule MISP hash ที่ชี้ไฟล์ตัวติดตั้งเดียวกัน
+# (ถ้า hash ของ stub อยู่ใน MISP แล้ว 110031 จะ match ก่อน 110050) ; เฉพาะ Event 1 (image) / 29 (target)
+$evPup = "$($alert.data.win.system.eventID)"
+$script:PupMode = (@($alert.rule.groups) -contains 'pup_installer') -or
+    ($evPup -eq '1' -and $npImage -match $pupInstallerPattern) -or
+    ($evPup -eq '29' -and $npTarget -match $pupInstallerPattern)
+if ($script:PupMode) { Log-Detail "PUP installer mode (rule $($alert.rule.id) EventID=$evPup): PUP signer not protected, target-only containment" }
 
 # GUARD (see Test-ProtectedSystemFile): the MISP feed has shipped hashes of
 # genuine Windows binaries (gcapi.dll 19 may, SysWOW64\rundll32.exe 25 may). If

@@ -14,6 +14,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Configuration defaults (can be overridden by environment variables)
 MISP_URL = os.environ.get("MISP_URL")
 API_KEY = os.environ.get("MISP_API_KEY")
+# Read-only key of org MDO-MOPH (51). ThreatFox events since Aug 2026 are owned by org 51 with
+# distribution 0, invisible to the org-1 sync key kept in .env. Remove the file to fall back to .env.
+KEY_FILE = os.environ.get("MISP_API_KEY_FILE", "/etc/misp-export/wazuh-export.SECRET")
+if os.path.isfile(KEY_FILE):
+    with open(KEY_FILE, encoding="utf-8") as fh:
+        API_KEY = fh.read().strip()
 VERIFY_SSL = os.environ.get("MISP_VERIFY_SSL", "False").lower() in ("true", "1", "t")
 
 # Batch size for pagination. Recommended: 1000.
@@ -162,7 +168,9 @@ def fetch_and_export_attributes(misp: PyMISP, output_file: str, type_attribute, 
 def main():
     parser = argparse.ArgumentParser(description="Export MISP attributes to Wazuh CDB format.")
     parser.add_argument("output_file", nargs="?", default="misp_sha256", help="Output file name or 'all' to export predefined sets.")
-    parser.add_argument("--type", dest="type_attribute", default="sha256", help="MISP attribute type (e.g. sha256, ip-src, etc.)")
+    parser.add_argument("--type", dest="type_attribute", default="sha256",
+                        help="MISP attribute type, comma-separated for several into one file "
+                             "(e.g. sha256 or 'ip-dst,ip-dst|port')")
     parser.add_argument("--output-dir", dest="output_dir", default=".", help="Directory to save the exported files")
     parser.add_argument("--days", type=int, default=300,
                         help=f"{TIME_FILTER_PARAM} window in days, applied ONLY to {sorted(TIME_FILTERED_TYPES)} "
@@ -198,9 +206,12 @@ def main():
             fetch_and_export_attributes(misp, full_path, attr_type, days=args.days)
             print(f"--- Finished export: {attr_type} ---")
     else:
-        # Single file export
+        # Single file export. Callers (cron, misp-webhook/refresh.sh) must list composite types
+        # explicitly - '--type ip-dst' alone silently drops ThreatFox ip-dst|port.
         full_path = os.path.join(args.output_dir, args.output_file)
-        fetch_and_export_attributes(misp, full_path, args.type_attribute, days=args.days)
+        types = [t.strip() for t in args.type_attribute.split(",") if t.strip()]
+        type_attribute = types[0] if len(types) == 1 else types
+        fetch_and_export_attributes(misp, full_path, type_attribute, days=args.days)
 
 if __name__ == "__main__":
     main()

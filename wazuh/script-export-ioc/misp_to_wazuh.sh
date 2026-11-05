@@ -45,6 +45,13 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
+# Read-only key of org MDO-MOPH (51). ThreatFox events since Aug 2026 are owned by org 51 with
+# distribution 0, invisible to the org-1 sync key kept in .env. Remove the file to fall back to .env.
+KEY_FILE="${MISP_API_KEY_FILE:-/etc/misp-export/wazuh-export.SECRET}"
+if [[ -r "$KEY_FILE" ]]; then
+    MISP_API_KEY="$(tr -d ' \r\n' < "$KEY_FILE")"
+fi
+
 [[ -n "${MISP_URL:-}" ]]     || { echo "$(date '+%F %T') ERROR: MISP_URL not set (env or .env)" >&2; exit 1; }
 [[ -n "${MISP_API_KEY:-}" ]] || { echo "$(date '+%F %T') ERROR: MISP_API_KEY not set (env or .env)" >&2; exit 1; }
 
@@ -74,8 +81,9 @@ trap 'rm -f "$TMP_FILE"' EXIT
 fetch_misp() {
     local url="$1" label="$2" out_var="$3"
     local body http_code
-    body=$(curl -sS "${SSL_OPT[@]}" -X GET \
-        -H "Authorization: $MISP_API_KEY" \
+    # Key goes in via stdin (-K -), not argv: argv is readable by any local user through /proc.
+    body=$(printf 'header = "Authorization: %s"\n' "$MISP_API_KEY" \
+      | curl -sS "${SSL_OPT[@]}" -X GET -K - \
         -H 'Accept: text/plain' \
         -w '\n__HTTP_CODE__:%{http_code}' \
         --max-time 180 \

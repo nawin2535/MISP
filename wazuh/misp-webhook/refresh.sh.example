@@ -20,12 +20,15 @@ ${ADMIN_HOME}/script-export-ioc/misp_to_wazuh.sh --days 300 >> $LOG 2>&1 || { ec
 
 # --days only applies to ip-src/ip-dst (gated by TIME_FILTERED_TYPES in export_misp_to_wazuh.py)
 # Pass it explicitly so behavior doesn't silently change if the Python default is altered.
-for t in sha256 domain ip-dst ip-src; do
+# <list>:<types> — composite ip-*|port (ThreatFox C2) and hostname must be listed, or the list misses them
+for spec in "sha256:sha256" "domain:domain,hostname" "ip-dst:ip-dst,ip-dst|port" "ip-src:ip-src,ip-src|port"; do
+  t="${spec%%:*}"
+  types="${spec#*:}"
   case "$t" in
     ip-src|ip-dst) EXTRA_ARGS=(--days 300) ;;
     *)             EXTRA_ARGS=() ;;
   esac
-  $VENV_PY $EXPORT_PY "misp_$t" --type $t --output-dir $OUT_DIR "${EXTRA_ARGS[@]}" >> $LOG 2>&1 \
+  $VENV_PY $EXPORT_PY "misp_$t" --type "$types" --output-dir $OUT_DIR "${EXTRA_ARGS[@]}" >> $LOG 2>&1 \
     || { echo "[$(date '+%F %T')] export $t FAIL" >> $LOG; exit 2; }
 done
 

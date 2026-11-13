@@ -1295,32 +1295,43 @@ function Invoke-Step9-DeployVnc {
         return $true
     }
 
-    # อ่านแค่บรรทัด Targets ก่อน: เครื่องที่ไม่อยู่ใน wave ไม่ต้องโหลดอะไร
-    $m = Select-String -Path $VncConfigPath -Pattern '^\s*Targets\s*=\s*(.*?)\s*$' | Select-Object -First 1
-    $targets = if ($m) { @($m.Matches[0].Groups[1].Value -split '\s*,\s*') } else { @() }
-    if (-not (($targets -contains 'all') -or ($targets -contains $env:COMPUTERNAME))) {
-        Write-Log "$env:COMPUTERNAME not in VNC Targets - skip" "INFO"
+    $deployPath = Join-Path $ScriptPath "deploy-vnc.ps1"
+    $msiPath    = Join-Path $ScriptPath ($VncMsiRelPath -replace '/', '\')
+    $scriptItem = @{
+        RelPath = "deploy-vnc.ps1"; TargetPath = $deployPath
+        MinBytes = 2000; EndMarker = '# EOF-SENTINEL-SSJMUK'; IsPowerShell = $true
+    }
+    if (-not (Invoke-AtomicGroupUpdate -GroupName "vnc-script" -Items @($scriptItem))) {
+        $script:VncInfo = "download failed"
+        return $false
+    }
+
+    # Targets (IP / wildcard / ชื่อเครื่อง) ตัดสินใน deploy-vnc.ps1 ที่เดียว ; เครื่องที่ไม่อยู่ใน wave ไม่ต้องโหลด MSI
+    $plan = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deployPath -Msi $msiPath -PlanOnly 2>&1
+    $planCode = $LASTEXITCODE
+    $planLine = $plan | Where-Object { "$_" -match '^(PLAN|SKIP|FAIL )' } | Select-Object -Last 1
+    if ($planCode -ne 0) {
+        $script:VncInfo = if ($planLine) { "$planLine" } else { "plan exit $planCode" }
+        Write-Log "Step 9 plan failed: $script:VncInfo" "ERROR"
+        return $false
+    }
+    if ("$planLine" -match '^SKIP') {
+        Write-Log "VNC: $planLine" "INFO"
         $script:VncInfo = "skip: not target"
         return $true
     }
 
-    $deployPath = Join-Path $ScriptPath "deploy-vnc.ps1"
-    $msiPath    = Join-Path $ScriptPath ($VncMsiRelPath -replace '/', '\')
-    $items = @(@{
-        RelPath = "deploy-vnc.ps1"; TargetPath = $deployPath
-        MinBytes = 2000; EndMarker = '# EOF-SENTINEL-SSJMUK'; IsPowerShell = $true
-    })
     # MSI ~2.5 MB โหลดเฉพาะเครื่องที่ยังไม่มี service (deploy-vnc.ps1 ตรวจ SHA256 + ลายเซ็นก่อนติดตั้ง)
     if (-not (Get-Service tvnserver -ErrorAction SilentlyContinue)) {
         New-Item -ItemType Directory -Path (Split-Path $msiPath) -Force | Out-Null
-        $items += @{
+        $msiItem = @{
             RelPath = $VncMsiRelPath; TargetPath = $msiPath
             MinBytes = 1000000; EndMarker = $null; IsPowerShell = $false
         }
-    }
-    if (-not (Invoke-AtomicGroupUpdate -GroupName "vnc" -Items $items)) {
-        $script:VncInfo = "download failed"
-        return $false
+        if (-not (Invoke-AtomicGroupUpdate -GroupName "vnc-msi" -Items @($msiItem))) {
+            $script:VncInfo = "MSI download failed"
+            return $false
+        }
     }
 
     $out  = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deployPath -Msi $msiPath 2>&1

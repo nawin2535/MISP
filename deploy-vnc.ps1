@@ -3,7 +3,8 @@ deploy-vnc.ps1 - ติดตั้ง/ดูแล TightVNC Server สำหร
 
 repo นี้เป็น public: ไฟล์นี้ไม่มีรหัส / IP / port / รายชื่อเครื่อง
 ค่าทั้งหมดอ่านจาก ssjmuk-vnc.SECRET ที่ Wazuh manager ส่งมาใน shared ของ agent group (อ่านได้เฉพาะ admin/SYSTEM)
-  Password=<hex> ControlPassword=<hex> Port=<10000-49151> Helpdesk=<ip,ip> Targets=<COMPUTERNAME,...|all>
+  Password=<hex> ControlPassword=<hex> Port=<10000-49151> Helpdesk=<ip,ip> Targets=<IP / a.b.c.* / COMPUTERNAME,...|all>
+การตัดสินว่าเครื่องอยู่ใน Targets มีที่นี่ที่เดียว (ssjmuk-task.ps1 Step 9 เรียก -PlanOnly ก่อนโหลด MSI)
 
 ห้ามมีขั้นโต้ตอบ (SYSTEM / session 0) ; ไม่แสดงค่ารหัสใน output
 exit: 0 = PASS หรือ SKIP ; 1-99 = จำนวน smoke FAIL ; 100 = หยุดกลางทาง (ข้อความขึ้นต้น FAIL)
@@ -47,6 +48,16 @@ function Read-VncConfig {
         # helpdesk = 2 (ถามผู้ใช้ก่อนรับ) ; IP อื่นทั้งหมด = 1 (ปฏิเสธ) — รูปแบบนี้ยืนยันแล้วว่ามีหน้าต่างถาม (pilot 13 พ.ย. 2569)
         Acl             = (@($helpdesk | ForEach-Object { "$_-$($_):2" }) + '0.0.0.0-255.255.255.255:1') -join ','
     }
+}
+
+function Test-Target($Cfg) {
+    # IP ทุกเครื่อง reserve ไว้แล้ว -> ใช้ IP / wildcard ได้ ; ชื่อเครื่องยังใช้ได้
+    $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress)
+    foreach ($t in $Cfg.Targets) {
+        if ($t -eq 'all' -or $t -eq $env:COMPUTERNAME) { return $true }
+        foreach ($ip in $ips) { if ($ip -like $t) { return $true } }
+    }
+    $false
 }
 
 function ConvertFrom-Hex([string]$Hex) {
@@ -215,7 +226,7 @@ function Invoke-Smoke($Cfg) {
 try {
     if (-not (Test-Path $ConfigPath)) { Write-Host 'SKIP ไม่มี config (ยังไม่เปิดใช้ VNC กับ group นี้)'; exit 0 }
     $cfg = Read-VncConfig
-    if (-not (($cfg.Targets -contains 'all') -or ($cfg.Targets -contains $env:COMPUTERNAME))) {
+    if (-not (Test-Target $cfg)) {
         Write-Host "SKIP $env:COMPUTERNAME ไม่อยู่ใน Targets"
         exit 0
     }

@@ -7,6 +7,7 @@ repo นี้เป็น public: ไฟล์นี้ไม่มีรหั
 การตัดสินว่าเครื่องอยู่ใน Targets มีที่นี่ที่เดียว (ssjmuk-task.ps1 Step 9 เรียก -PlanOnly ก่อนโหลด MSI)
 
 ห้ามมีขั้นโต้ตอบ (SYSTEM / session 0) ; ไม่แสดงค่ารหัสใน output
+output เป็นภาษาอังกฤษ: ssjmuk-task อ่าน stdout ของ process ลูกด้วย codepage ของเครื่อง ภาษาไทยจะเพี้ยนใน log
 exit: 0 = PASS หรือ SKIP ; 1-99 = จำนวน smoke FAIL ; 100 = หยุดกลางทาง (ข้อความขึ้นต้น FAIL)
   -PlanOnly : อ่าน config + ตรวจ Targets/MSI แล้วบอกว่าจะทำอะไร ไม่แก้เครื่อง
 #>
@@ -29,15 +30,15 @@ function Read-VncConfig {
     foreach ($line in Get-Content -Path $ConfigPath) {
         if ($line -match '^\s*(\w+)\s*=\s*(.*?)\s*$') { $cfg[$Matches[1]] = $Matches[2] }
     }
-    foreach ($k in 'Password', 'Port', 'Helpdesk', 'Targets') { if (-not $cfg[$k]) { throw "config ขาด $k" } }
-    if ($cfg.Password -notmatch '^([0-9a-fA-F]{2})+$') { throw 'config Password ไม่ใช่ hex' }
-    if ($cfg.ControlPassword -and $cfg.ControlPassword -notmatch '^([0-9a-fA-F]{2})+$') { throw 'config ControlPassword ไม่ใช่ hex' }
+    foreach ($k in 'Password', 'Port', 'Helpdesk', 'Targets') { if (-not $cfg[$k]) { throw "config missing $k" } }
+    if ($cfg.Password -notmatch '^([0-9a-fA-F]{2})+$') { throw 'config Password is not hex' }
+    if ($cfg.ControlPassword -and $cfg.ControlPassword -notmatch '^([0-9a-fA-F]{2})+$') { throw 'config ControlPassword is not hex' }
     $port = 0
-    if (-not [int]::TryParse($cfg.Port, [ref]$port) -or $port -lt 10000 -or $port -gt 49151) { throw 'config Port ต้องเป็น 10000-49151' }
+    if (-not [int]::TryParse($cfg.Port, [ref]$port) -or $port -lt 10000 -or $port -gt 49151) { throw 'config Port must be 10000-49151' }
     $helpdesk = @($cfg.Helpdesk -split '\s*,\s*' | Where-Object { $_ })
     foreach ($h in $helpdesk) {
         $ip = $null
-        if ($h -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or -not [Net.IPAddress]::TryParse($h, [ref]$ip)) { throw "config Helpdesk '$h' ไม่ใช่ IP เดี่ยว" }
+        if ($h -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or -not [Net.IPAddress]::TryParse($h, [ref]$ip)) { throw "config Helpdesk '$h' is not a single IPv4" }
     }
     [pscustomobject]@{
         Password        = $cfg.Password
@@ -85,6 +86,8 @@ function Get-OtherVncAllowRules {
 
 function Get-BroadAllowRules {
     # rule allow ขาเข้าที่ไม่จำกัดอะไรเลย (port/IP/program/service = Any) เปิด port VNC ให้ทุกคนข้าม rule จำกัด IP ของเรา
+    # rule ที่ผูก package (แอป Store/UWP เช่น Teams, Xbox) มีผลกับ process ใน AppContainer นั้นเท่านั้น -> ไม่นับ
+    # (13 พ.ย. 2569: นับรวมแล้วเครื่อง client เจอ 39 rule ที่เป็นของแอป Store ทั้งหมด)
     $rules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue)
     if (-not $rules.Count) { return @() }
     $port = @{}; Get-NetFirewallPortFilter -All | ForEach-Object { $port[$_.InstanceID] = $_ }
@@ -92,9 +95,10 @@ function Get-BroadAllowRules {
     $app  = @{}; Get-NetFirewallApplicationFilter -All | ForEach-Object { $app[$_.InstanceID] = $_ }
     $svc  = @{}; Get-NetFirewallServiceFilter -All | ForEach-Object { $svc[$_.InstanceID] = $_ }
     $rules | Where-Object {
-        $id = $_.InstanceID; $p = $port[$id]
+        $id = $_.InstanceID; $p = $port[$id]; $a = $app[$id]
         $p -and ($p.Protocol -in 'Any', 'TCP') -and (@($p.LocalPort) -contains 'Any') -and
-        (@($addr[$id].RemoteAddress) -contains 'Any') -and $app[$id].Program -eq 'Any' -and $svc[$id].Service -eq 'Any'
+        (@($addr[$id].RemoteAddress) -contains 'Any') -and $a.Program -eq 'Any' -and -not $a.Package -and
+        $svc[$id].Service -eq 'Any'
     }
 }
 
@@ -105,13 +109,13 @@ function Test-RegValue([string]$Name) {
 
 function Test-Prereq($Cfg) {
     $hit = Get-ExcludedRanges | Where-Object { -not $_.Admin -and $Cfg.Port -ge $_.Start -and $Cfg.Port -le $_.End } | Select-Object -First 1
-    if ($hit) { throw "Port $($Cfg.Port) อยู่ในช่วงที่ระบบจอง $($hit.Start)-$($hit.End)" }
+    if ($hit) { throw "port $($Cfg.Port) is inside a system-reserved range $($hit.Start)-$($hit.End)" }
     $used = Get-NetTCPConnection -LocalPort $Cfg.Port -State Listen -ErrorAction SilentlyContinue | Where-Object {
         (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name -ne $SvcName
     } | Select-Object -First 1
-    if ($used) { throw "Port $($Cfg.Port) มีโปรแกรมอื่นฟังอยู่ (PID $($used.OwningProcess))" }
+    if ($used) { throw "port $($Cfg.Port) is used by another process (PID $($used.OwningProcess))" }
     $off = @(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' })
-    if ($off.Count) { throw "Windows Firewall ปิดอยู่ใน profile: $($off.Name -join ', ') -> ไม่ติดตั้ง (rule จำกัด IP จะไม่มีผล)" }
+    if ($off.Count) { throw "Windows Firewall disabled on profile: $($off.Name -join ', ') - not installing (IP restriction would have no effect)" }
 }
 
 function Set-PortReservation([int]$Port) {
@@ -119,21 +123,21 @@ function Set-PortReservation([int]$Port) {
     # ; การจองแบบ administered ไม่กัน tvnserver bind (ยืนยันจาก pilot 2 เครื่อง)
     if (Get-ExcludedRanges | Where-Object { $_.Admin -and $Port -ge $_.Start -and $Port -le $_.End }) { return }
     netsh int ipv4 add excludedportrange protocol=tcp startport=$Port numberofports=1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "จอง port $Port ไม่สำเร็จ (netsh exit $LASTEXITCODE)" }
-    Write-Host "  จอง port $Port"
+    if ($LASTEXITCODE -ne 0) { throw "port $Port reservation failed (netsh exit $LASTEXITCODE)" }
+    Write-Host "  reserved port $Port"
 }
 
 function Install-Server {
-    if (-not (Test-Path $Msi)) { throw "ไม่พบ MSI $Msi" }
+    if (-not (Test-Path $Msi)) { throw "MSI not found: $Msi" }
     $hash = (Get-FileHash $Msi -Algorithm SHA256).Hash
-    if ($hash -ne $MsiSha256) { throw "SHA256 MSI ไม่ตรงค่าที่ pin ($hash)" }
+    if ($hash -ne $MsiSha256) { throw "MSI SHA256 does not match pinned value ($hash)" }
     $sig = Get-AuthenticodeSignature $Msi
-    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*GlavSoft*') { throw "ลายเซ็น MSI ไม่ผ่าน ($($sig.Status))" }
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*GlavSoft*') { throw "MSI signature check failed ($($sig.Status))" }
     # ค่า server เขียน registry เองใน Set-ServerConfig ; MSI รับแค่ส่วนที่ต้องทำตอนติดตั้ง
     $msiArgs = "/i `"$Msi`" /quiet /norestart ADDLOCAL=Server SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=0"
     $code = (Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru).ExitCode
     if ($code -notin 0, 3010) { throw "msiexec exit $code" }
-    Write-Host "  ติดตั้ง TightVNC Server (msiexec exit $code)"
+    Write-Host "  installed TightVNC Server (msiexec exit $code)"
     $script:Changed = $true
 }
 
@@ -141,7 +145,7 @@ function Set-RegIfDiff([string]$Name, $Value, [string]$Type) {
     $cur = (Get-ItemProperty -Path $RegPath -Name $Name -ErrorAction SilentlyContinue).$Name
     if ("$cur" -ne "$Value") {
         Set-ItemProperty -Path $RegPath -Name $Name -Value $Value -Type $Type
-        Write-Host "  ตั้ง $Name"
+        Write-Host "  set $Name"
         $script:Changed = $true
     }
 }
@@ -152,7 +156,7 @@ function Set-SecretIfDiff([string]$Name, [string]$Hex) {
     if (($cur -is [byte[]]) -and ([Convert]::ToBase64String($cur) -eq [Convert]::ToBase64String($want))) { return }
     # เขียนผ่าน .NET ไม่ใช้ Set-ItemProperty : PowerShell module logging (EID 4103) บันทึกค่า parameter ของ cmdlet
     [Microsoft.Win32.Registry]::SetValue($RegNet, $Name, $want, [Microsoft.Win32.RegistryValueKind]::Binary)
-    Write-Host "  ตั้ง $Name (ไม่แสดงค่า)"
+    Write-Host "  set $Name (value not shown)"
     $script:Changed = $true
 }
 
@@ -179,15 +183,15 @@ function Set-Firewall($Cfg) {
         $pf = $rule | Get-NetFirewallPortFilter
         if ($addr -ne $want -or "$($pf.LocalPort)" -ne "$($Cfg.Port)" -or $pf.Protocol -ne 'TCP' -or $rule.Enabled -ne 'True' -or $rule.Action -ne 'Allow') {
             Set-NetFirewallRule -DisplayName $FwName -Protocol TCP -LocalPort $Cfg.Port -RemoteAddress $Cfg.Helpdesk -Action Allow -Enabled True
-            Write-Host '  แก้ firewall rule'
+            Write-Host '  updated firewall rule'
         }
     } else {
         New-NetFirewallRule -DisplayName $FwName -Direction Inbound -Protocol TCP -LocalPort $Cfg.Port -RemoteAddress $Cfg.Helpdesk -Action Allow -Profile Any | Out-Null
-        Write-Host '  สร้าง firewall rule'
+        Write-Host '  created firewall rule'
     }
     foreach ($r in Get-OtherVncAllowRules) {
         Disable-NetFirewallRule -Name $r.Name
-        Write-Host "  ปิด rule allow ที่ไม่จำกัด IP: $($r.DisplayName)"
+        Write-Host "  disabled unrestricted TightVNC allow rule: $($r.DisplayName)"
     }
 }
 
@@ -200,34 +204,34 @@ function Invoke-Smoke($Cfg) {
     $fwPort = if ($fw) { ($fw | Get-NetFirewallPortFilter).LocalPort } else { '' }
     $broad  = @(Get-BroadAllowRules)
     $checks = [ordered]@{
-        'service tvnserver Running'               = (Get-Service $SvcName -ErrorAction SilentlyContinue).Status -eq 'Running'
-        'RfbPort ตรง config'                         = $r.RfbPort -eq $Cfg.Port
-        'listen port config และไม่ listen 5900/5800' = ($listen -contains $Cfg.Port) -and ($listen -notcontains 5900) -and ($listen -notcontains 5800)
-        'AcceptHttpConnections = 0'                = $r.AcceptHttpConnections -eq 0
-        'IpAccessControl ตรง config'                = $r.IpAccessControl -eq $Cfg.Acl
-        'QueryAcceptOnTimeout = 0'                 = $r.QueryAcceptOnTimeout -eq 0
-        'ตั้งรหัสแล้ว (UseVncAuthentication = 1)'     = (Test-RegValue 'Password') -and $r.UseVncAuthentication -eq 1
-        'ตั้ง control password แล้ว'                 = (-not $Cfg.ControlPassword) -or ((Test-RegValue 'ControlPassword') -and $r.UseControlAuthentication -eq 1)
-        'firewall rule จำกัดเฉพาะ helpdesk'          = [bool]$fw -and $fwAddr -eq ((@($Cfg.Helpdesk) | Sort-Object) -join ',') -and "$fwPort" -eq "$($Cfg.Port)"
-        'ไม่มี rule allow อื่นของ TightVNC'          = -not (Get-OtherVncAllowRules)
-        "ไม่มี rule allow ขาเข้าแบบกว้าง (พบ $($broad.Count))" = $broad.Count -eq 0
-        'จอง port แล้ว (excludedportrange)'         = [bool](Get-ExcludedRanges | Where-Object { $_.Admin -and $Cfg.Port -ge $_.Start -and $Cfg.Port -le $_.End })
-        'Windows Firewall เปิดทุก profile'           = -not (Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' })
+        'service tvnserver running'                   = (Get-Service $SvcName -ErrorAction SilentlyContinue).Status -eq 'Running'
+        'RfbPort matches config'                      = $r.RfbPort -eq $Cfg.Port
+        'listening on config port, not 5900/5800'     = ($listen -contains $Cfg.Port) -and ($listen -notcontains 5900) -and ($listen -notcontains 5800)
+        'AcceptHttpConnections = 0'                   = $r.AcceptHttpConnections -eq 0
+        'IpAccessControl matches config'              = $r.IpAccessControl -eq $Cfg.Acl
+        'QueryAcceptOnTimeout = 0'                    = $r.QueryAcceptOnTimeout -eq 0
+        'password set (UseVncAuthentication = 1)'     = (Test-RegValue 'Password') -and $r.UseVncAuthentication -eq 1
+        'control password set'                        = (-not $Cfg.ControlPassword) -or ((Test-RegValue 'ControlPassword') -and $r.UseControlAuthentication -eq 1)
+        'firewall rule limited to helpdesk'           = [bool]$fw -and $fwAddr -eq ((@($Cfg.Helpdesk) | Sort-Object) -join ',') -and "$fwPort" -eq "$($Cfg.Port)"
+        'no other TightVNC allow rule'                = -not (Get-OtherVncAllowRules)
+        "no broad inbound allow rule (found $($broad.Count))" = $broad.Count -eq 0
+        'port reserved (excludedportrange)'           = [bool](Get-ExcludedRanges | Where-Object { $_.Admin -and $Cfg.Port -ge $_.Start -and $Cfg.Port -le $_.End })
+        'Windows Firewall enabled on all profiles'    = -not (Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' })
     }
     $fail = 0
     foreach ($c in $checks.GetEnumerator()) {
         if ($c.Value) { Write-Host "PASS  $($c.Key)" } else { $fail++; Write-Host "FAIL  $($c.Key)" }
     }
-    foreach ($b in $broad) { Write-Host "  rule กว้าง: $($b.DisplayName)" }
+    foreach ($b in $broad) { Write-Host "  broad rule: $($b.DisplayName)" }
     if ($fail) { Write-Host "SUMMARY FAIL ($fail)" } else { Write-Host 'SUMMARY PASS' }
     $fail
 }
 
 try {
-    if (-not (Test-Path $ConfigPath)) { Write-Host 'SKIP ไม่มี config (ยังไม่เปิดใช้ VNC กับ group นี้)'; exit 0 }
+    if (-not (Test-Path $ConfigPath)) { Write-Host 'SKIP no config (VNC not enabled for this group)'; exit 0 }
     $cfg = Read-VncConfig
     if (-not (Test-Target $cfg)) {
-        Write-Host "SKIP $env:COMPUTERNAME ไม่อยู่ใน Targets"
+        Write-Host "SKIP $env:COMPUTERNAME not in Targets"
         exit 0
     }
     $installed = [bool](Get-Service $SvcName -ErrorAction SilentlyContinue)
@@ -242,10 +246,10 @@ try {
     Set-Firewall $cfg
     if ($script:Changed) {
         Restart-Service $SvcName
-        Write-Host '  restart tvnserver'
+        Write-Host '  restarted tvnserver'
     } elseif ((Get-Service $SvcName).Status -ne 'Running') {
         Start-Service $SvcName
-        Write-Host '  start tvnserver'
+        Write-Host '  started tvnserver'
     }
     exit (Invoke-Smoke $cfg)
 } catch {

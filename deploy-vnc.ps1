@@ -86,8 +86,9 @@ function Get-OtherVncAllowRules {
 
 function Get-BroadAllowRules {
     # rule allow ขาเข้าที่ไม่จำกัดอะไรเลย (port/IP/program/service = Any) เปิด port VNC ให้ทุกคนข้าม rule จำกัด IP ของเรา
-    # rule ที่ผูก package (แอป Store/UWP เช่น Teams, Xbox) มีผลกับ process ใน AppContainer นั้นเท่านั้น -> ไม่นับ
-    # (13 พ.ย. 2569: นับรวมแล้วเครื่อง client เจอ 39 rule ที่เป็นของแอป Store ทั้งหมด)
+    # rule ของแอป Store/UWP (Teams, Xbox ...) = network isolation มีผลกับ AppContainer ของแอปนั้นเท่านั้น -> ไม่นับ
+    # ระบุได้จาก Package (application filter) หรือ Owner (SID ผู้ติดตั้งแอป) ; rule ที่ installer/admin สร้างไม่มีทั้งคู่
+    # (13 พ.ย. 2569: ไม่กรอง = 39 rule, กรอง Package อย่างเดียว = 31 ที่เหลือมีแต่ Owner)
     $rules = @(Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue)
     if (-not $rules.Count) { return @() }
     $port = @{}; Get-NetFirewallPortFilter -All | ForEach-Object { $port[$_.InstanceID] = $_ }
@@ -98,7 +99,7 @@ function Get-BroadAllowRules {
         $id = $_.InstanceID; $p = $port[$id]; $a = $app[$id]
         $p -and ($p.Protocol -in 'Any', 'TCP') -and (@($p.LocalPort) -contains 'Any') -and
         (@($addr[$id].RemoteAddress) -contains 'Any') -and $a.Program -eq 'Any' -and -not $a.Package -and
-        $svc[$id].Service -eq 'Any'
+        -not $_.Owner -and $svc[$id].Service -eq 'Any'
     }
 }
 

@@ -31,6 +31,11 @@ $DiscordWebhookUrl = "https://discord.com/api/webhooks/1485825229547901110/tGVBh
 $VersionWazuh  = "4.14.10"
 $URL_Download  = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.10-1.msi"
 
+# Step 9: VNC helpdesk - รหัส/IP/port/Targets มาจาก Wazuh shared (agent group) ไม่อยู่ใน repo public
+# ไม่มีไฟล์นี้ = ยังไม่เปิดใช้ -> ข้าม ; MSI pin SHA256 ใน deploy-vnc.ps1
+$VncConfigPath = "${env:ProgramFiles(x86)}\ossec-agent\shared\ssjmuk-vnc.SECRET"
+$VncMsiRelPath = "vnc/tightvnc-2.8.85-gpl-setup-64bit.msi"
+
 # Scripts to download from GitHub before execution
 $ScriptsToDownload = @(
     @{
@@ -57,6 +62,9 @@ $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
 
 # Step 7: เก็บ version info สำหรับแสดงใน Discord summary
 $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หรือ "4.14.5 (up-to-date)"
+
+# Step 9: ผล VNC สำหรับ Discord summary (SKIP / SUMMARY PASS / SUMMARY FAIL (n) / FAIL ...)
+$script:VncInfo = $null
 
 # Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
 $script:JitterInfo = $null
@@ -129,6 +137,9 @@ function Send-DiscordSummary {
         # เพิ่มสถานะติดตั้ง CA (installed / already trusted / failed)
         if ($_.Name -eq "CATrustDeploy" -and $script:CATrustInfo) {
             $line += " [$script:CATrustInfo]"
+        }
+        if ($_.Name -eq "Step9-DeployVnc" -and $script:VncInfo) {
+            $line += " [$script:VncInfo]"
         }
         $line
     }
@@ -1272,6 +1283,58 @@ function Invoke-Step8-RotateLogs {
     Write-Log "Step 8 completed successfully" "SUCCESS"
     return $true
 }
+
+function Invoke-Step9-DeployVnc {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 9: VNC helpdesk (TightVNC)" "INFO"
+    Write-Log "========================================" "INFO"
+
+    if (-not (Test-Path $VncConfigPath)) {
+        Write-Log "No VNC config in Wazuh shared - skip" "INFO"
+        $script:VncInfo = "skip: no config"
+        return $true
+    }
+
+    # อ่านแค่บรรทัด Targets ก่อน: เครื่องที่ไม่อยู่ใน wave ไม่ต้องโหลดอะไร
+    $m = Select-String -Path $VncConfigPath -Pattern '^\s*Targets\s*=\s*(.*?)\s*$' | Select-Object -First 1
+    $targets = if ($m) { @($m.Matches[0].Groups[1].Value -split '\s*,\s*') } else { @() }
+    if (-not (($targets -contains 'all') -or ($targets -contains $env:COMPUTERNAME))) {
+        Write-Log "$env:COMPUTERNAME not in VNC Targets - skip" "INFO"
+        $script:VncInfo = "skip: not target"
+        return $true
+    }
+
+    $deployPath = Join-Path $ScriptPath "deploy-vnc.ps1"
+    $msiPath    = Join-Path $ScriptPath ($VncMsiRelPath -replace '/', '\')
+    $items = @(@{
+        RelPath = "deploy-vnc.ps1"; TargetPath = $deployPath
+        MinBytes = 2000; EndMarker = '# EOF-SENTINEL-SSJMUK'; IsPowerShell = $true
+    })
+    # MSI ~2.5 MB โหลดเฉพาะเครื่องที่ยังไม่มี service (deploy-vnc.ps1 ตรวจ SHA256 + ลายเซ็นก่อนติดตั้ง)
+    if (-not (Get-Service tvnserver -ErrorAction SilentlyContinue)) {
+        New-Item -ItemType Directory -Path (Split-Path $msiPath) -Force | Out-Null
+        $items += @{
+            RelPath = $VncMsiRelPath; TargetPath = $msiPath
+            MinBytes = 1000000; EndMarker = $null; IsPowerShell = $false
+        }
+    }
+    if (-not (Invoke-AtomicGroupUpdate -GroupName "vnc" -Items $items)) {
+        $script:VncInfo = "download failed"
+        return $false
+    }
+
+    $out  = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $deployPath -Msi $msiPath 2>&1
+    $code = $LASTEXITCODE
+    foreach ($l in $out) { Write-Log "  vnc: $l" "INFO" }
+    $last = $out | Where-Object { "$_" -match '^(SUMMARY|SKIP|FAIL )' } | Select-Object -Last 1
+    $script:VncInfo = if ($last) { "$last" } else { "exit $code" }
+    if ($code -eq 0) {
+        Write-Log "Step 9 completed: $script:VncInfo" "SUCCESS"
+        return $true
+    }
+    Write-Log "Step 9 exit $code : $script:VncInfo" "ERROR"
+    return $false
+}
 #endregion
 
 #region Main Execution
@@ -1367,6 +1430,11 @@ try {
         $Step8Result = Invoke-Step8-RotateLogs
         $ScriptResults.Add(@{ Name = "Step8-RotateLogs"; Success = $Step8Result; Required = $false })
         if (-not $Step8Result) { Write-Log "Step 8 failed (non-critical)" "WARNING" }
+
+        # Step 9
+        $Step9Result = Invoke-Step9-DeployVnc
+        $ScriptResults.Add(@{ Name = "Step9-DeployVnc"; Success = $Step9Result; Required = $false })
+        if (-not $Step9Result) { Write-Log "Step 9 failed (non-critical)" "WARNING" }
     }
 
     # Summary log

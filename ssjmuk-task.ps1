@@ -63,7 +63,7 @@ $script:LogBuffer = [System.Collections.Generic.List[string]]::new()
 # Step 7: เก็บ version info สำหรับแสดงใน Discord summary
 $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หรือ "4.14.5 (up-to-date)"
 
-# Step 9: ผล VNC สำหรับ Discord summary (SKIP / SUMMARY PASS / SUMMARY FAIL (n) / FAIL ...)
+# Step 9: ผล VNC สำหรับ Discord summary (SKIP / SUMMARY PASS / SUMMARY FAIL (n) / FAIL ... ; ต่อท้าย "- WARN firewall off: ..." ได้)
 $script:VncInfo = $null
 
 # Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
@@ -120,6 +120,7 @@ function Send-DiscordSummary {
     # Unicode escape - ไม่พึ่ง emoji literal ในไฟล์
     $iconOK   = [System.Char]::ConvertFromUtf32(0x2705)  # ✅
     $iconFail = [System.Char]::ConvertFromUtf32(0x274C)  # ❌
+    $iconWarn = [System.Char]::ConvertFromUtf32(0x26A0) + [char]0xFE0F
 
     $StatusText = if ($OverallSuccess) { "SUCCESS" } else { "ERROR" }
     $TitleIcon  = if ($OverallSuccess) { $iconOK } else { $iconFail }
@@ -139,6 +140,8 @@ function Send-DiscordSummary {
             $line += " [$script:CATrustInfo]"
         }
         if ($_.Name -eq "Step9-DeployVnc" -and $script:VncInfo) {
+            # ติดตั้งผ่านแต่ firewall ปิด = รายการงาน helpdesk (ค้น "firewall off" ใน Discord) ไม่ใช่ FAIL
+            if ($_.Success -and $script:VncInfo -match 'WARN') { $line = "$iconWarn $($_.Name) $req" }
             $line += " [$script:VncInfo]"
         }
         $line

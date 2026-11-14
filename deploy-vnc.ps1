@@ -9,6 +9,7 @@ repo นี้เป็น public: ไฟล์นี้ไม่มีรหั
 ห้ามมีขั้นโต้ตอบ (SYSTEM / session 0) ; ไม่แสดงค่ารหัสใน output
 output เป็นภาษาอังกฤษ: ssjmuk-task อ่าน stdout ของ process ลูกด้วย codepage ของเครื่อง ภาษาไทยจะเพี้ยนใน log
 exit: 0 = PASS หรือ SKIP ; 1-99 = จำนวน smoke FAIL ; 100 = หยุดกลางทาง (ข้อความขึ้นต้น FAIL)
+  Windows Firewall ปิดบาง profile = ติดตั้งต่อ + ต่อท้าย SUMMARY ด้วย "- WARN firewall off: <profile>" (ไม่เปลี่ยน exit)
   -PlanOnly : อ่าน config + ตรวจ Targets/MSI แล้วบอกว่าจะทำอะไร ไม่แก้เครื่อง
 #>
 param(
@@ -115,8 +116,19 @@ function Test-Prereq($Cfg) {
         (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name -ne $SvcName
     } | Select-Object -First 1
     if ($used) { throw "port $($Cfg.Port) is used by another process (PID $($used.OwningProcess))" }
-    $off = @(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' })
-    if ($off.Count) { throw "Windows Firewall disabled on profile: $($off.Name -join ', ') - not installing (IP restriction would have no effect)" }
+}
+
+function Get-FirewallOff {
+    # เดิมหยุดติดตั้งเมื่อ firewall ปิด -> 14 พ.ย. 2569 user ตัดสินให้ติดตั้งก่อน แล้ว helpdesk VNC เข้าไปเปิด firewall เอง
+    # (ไม่สั่งเปิดอัตโนมัติ: เครื่องที่ปิดไว้มักมีโปรแกรม/แชร์ที่ต้องใช้ เปิดเงียบ ๆ = งานพังพร้อมกันหลายเครื่อง)
+    # ระหว่างนั้น port เหลือ TightVNC IpAccessControl (IP อื่นปฏิเสธ) + รหัส + หน้าต่างถาม -> รายงาน WARN เป็นรายการงาน
+    @(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' } | Select-Object -ExpandProperty Name)
+}
+
+function Format-Summary([int]$Fail, [string[]]$FwOff) {
+    $s = if ($Fail) { "SUMMARY FAIL ($Fail)" } else { 'SUMMARY PASS' }
+    if ($FwOff) { $s += " - WARN firewall off: $($FwOff -join ', ')" }
+    $s
 }
 
 function Set-PortReservation([int]$Port) {
@@ -217,14 +229,15 @@ function Invoke-Smoke($Cfg) {
         'no other TightVNC allow rule'                = -not (Get-OtherVncAllowRules)
         "no broad inbound allow rule (found $($broad.Count))" = $broad.Count -eq 0
         'port reserved (excludedportrange)'           = [bool](Get-ExcludedRanges | Where-Object { $_.Admin -and $Cfg.Port -ge $_.Start -and $Cfg.Port -le $_.End })
-        'Windows Firewall enabled on all profiles'    = -not (Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' })
     }
     $fail = 0
     foreach ($c in $checks.GetEnumerator()) {
         if ($c.Value) { Write-Host "PASS  $($c.Key)" } else { $fail++; Write-Host "FAIL  $($c.Key)" }
     }
     foreach ($b in $broad) { Write-Host "  broad rule: $($b.DisplayName)" }
-    if ($fail) { Write-Host "SUMMARY FAIL ($fail)" } else { Write-Host 'SUMMARY PASS' }
+    $off = @(Get-FirewallOff)
+    if ($off.Count) { Write-Host "WARN  Windows Firewall disabled on profile: $($off -join ', ') - port guarded only by TightVNC IP filter + password + user prompt ; helpdesk to enable firewall via VNC" }
+    Write-Host (Format-Summary $fail $off)
     $fail
 }
 

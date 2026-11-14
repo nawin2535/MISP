@@ -3,6 +3,7 @@
 ## Watchdog-aware containment (signature-gated) + DFIR collection (background job)
 ## v36 5aug2569: Authenticode gate + BYOVD carve-out + takeown/sdset + Confirm-IocFile
 ## v37 28oct2569: PUP installer mode (WPS) - signer carve-out + target-only containment
+## v38 15nov2569: IoC IP/domain = alert only (block at FortiGate) - drop Event 3 firewall rule + hosts sinkhole
 ################################
 
 $logFile    = "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log"
@@ -573,11 +574,9 @@ if (-not $IOCvalue -and $alert.syscheck.sha256_after) {
     $IOCvalue = ($alert.syscheck.sha256_after).ToUpper(); $IOCtype = "sha256"; $IOCmode = "FIM"
     Log-Detail "Mode B: FIM IOC=$IOCvalue"
 }
+# Event 3 (IP) is not handled here on purpose: IoC IPs are blocked at FortiGate, Wazuh only alerts (v38)
 if (-not $IOCvalue) {
-    if ($eventID -eq "3" -and $alert.data.win.eventdata.destinationIp) {
-        $IOCvalue = $alert.data.win.eventdata.destinationIp; $IOCtype = "ip"; $IOCmode = "Event3"
-        Log-Detail "Mode D: Event3 IP=$IOCvalue"
-    } elseif ($eventID -eq "22" -and $alert.data.win.eventdata.queryName) {
+    if ($eventID -eq "22" -and $alert.data.win.eventdata.queryName) {
         $IOCvalue = $alert.data.win.eventdata.queryName; $IOCtype = "domain"; $IOCmode = "Event22"
         Log-Detail "Mode D: Event22 Domain=$IOCvalue"
     }
@@ -700,27 +699,19 @@ if ($IOCtype -eq "sha256" -and -not $anyDiskTarget) {
     else { Log-Detail "Mode B: hash not located in known drop dirs" }
 }
 
-# 7. Network Block (Event 3)
+# 7. (removed v38) Network Block (Event 3) - a per-client firewall rule was never removed and
+# turned into a permanent block once the IoC aged into an FP; IoC IPs are blocked at FortiGate.
 $winSystem    = $alert.data.win.system
 $winEventdata = $alert.data.win.eventdata
 
-if ($winSystem.eventID -eq '3') {
-    $ip = $winEventdata.destinationIp
-    if ($ip) {
-        Start-DFIRBackground -EventType "Event3" -IOCValue $ip -IOCType "ip" -AlertJson $inputJson -ProcessImage $winEventdata.image -DestinationIp $ip -AgentName $agentName
-        $ruleName = "Wazuh AR Block $ip"
-        if ($command -eq "add") { New-NetFirewallRule -DisplayName $ruleName -Direction Outbound -Action Block -RemoteAddress $ip -Protocol Any; Log-Detail "Blocked IP: $ip" }
-        elseif ($command -eq "delete") { Remove-NetFirewallRule -DisplayName $ruleName -EA SilentlyContinue; Log-Detail "Unblocked IP: $ip" }
-    }
-}
-
-# 8. Domain Block (Event 22)
+# 8. Domain (Event 22) - evidence only. The hosts-file sinkhole was dropped in v38 for the same
+# reason as section 7 (never removed); MISP domains are blocked by FortiGate DNS filter.
+# Reaching here means the querying process is unsigned (the Authenticode gate exits for signed ones).
 if ($winSystem.eventID -eq '22') {
-    $domain    = $winEventdata.queryName
-    $hostsPath = "C:\Windows\System32\drivers\etc\hosts"
+    $domain = $winEventdata.queryName
     if ($domain) {
         Start-DFIRBackground -EventType "Event22" -IOCValue $domain -IOCType "domain" -AlertJson $inputJson -ProcessImage $winEventdata.image -Domain $domain -AgentName $agentName
-        if (-not (Select-String $hostsPath $domain -Quiet)) { Add-Content $hostsPath "127.0.0.1`t$domain"; Log-Detail "Blocked domain: $domain" }
+        Log-Detail "Event22 domain $domain from unsigned $($winEventdata.image): DFIR started, no block (FortiGate DNS filter)"
     }
 }
 

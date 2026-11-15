@@ -5,6 +5,8 @@ repo นี้เป็น public: ไฟล์นี้ไม่มีรหั
 ค่าทั้งหมดอ่านจาก ssjmuk-vnc.SECRET ที่ Wazuh manager ส่งมาใน shared ของ agent group (อ่านได้เฉพาะ admin/SYSTEM)
   Password=<hex> ControlPassword=<hex> Port=<10000-49151> Helpdesk=<ip,ip> Targets=<IP / a.b.c.* / COMPUTERNAME,...|all>
 การตัดสินว่าเครื่องอยู่ใน Targets มีที่นี่ที่เดียว (ssjmuk-task.ps1 Step 9 เรียก -PlanOnly ก่อนโหลด MSI)
+  Targets = ใครได้ติดตั้งใหม่ ; เครื่องที่ติดตั้งแล้ว (managed) แต่ตอนรันไม่อยู่ใน Targets ยัง sync config/firewall
+  โดยไม่ start service ที่หยุดไว้ ; SUMMARY ต่อท้าย "- managed (not in Targets)"
 
 ห้ามมีขั้นโต้ตอบ (SYSTEM / session 0) ; ไม่แสดงค่ารหัสใน output
 output เป็นภาษาอังกฤษ: ssjmuk-task อ่าน stdout ของ process ลูกด้วย codepage ของเครื่อง ภาษาไทยจะเพี้ยนใน log
@@ -60,6 +62,12 @@ function Test-Target($Cfg) {
         foreach ($ip in $ips) { if ($ip -like $t) { return $true } }
     }
     $false
+}
+
+function Test-Managed {
+    # ติดตั้งแล้ว + มี rule ของเรา = อยู่ในฟลีต VNC แม้ตอนรัน IP ไม่อยู่ใน Targets (เช่นโน้ตบุ๊กนอก office)
+    # -> ยัง sync config ไม่อย่างนั้นถอด IP helpdesk / เปลี่ยนรหัสแล้วเครื่องนี้ค้างค่าเก่า (15 พ.ย. 2569)
+    [bool](Get-Service $SvcName -ErrorAction SilentlyContinue) -and [bool](Get-NetFirewallRule -DisplayName $FwName -ErrorAction SilentlyContinue)
 }
 
 function ConvertFrom-Hex([string]$Hex) {
@@ -125,9 +133,10 @@ function Get-FirewallOff {
     @(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'False' } | Select-Object -ExpandProperty Name)
 }
 
-function Format-Summary([int]$Fail, [string[]]$FwOff) {
+function Format-Summary([int]$Fail, [string[]]$FwOff, [string]$Note = '') {
     $s = if ($Fail) { "SUMMARY FAIL ($Fail)" } else { 'SUMMARY PASS' }
     if ($FwOff) { $s += " - WARN firewall off: $($FwOff -join ', ')" }
+    if ($Note) { $s += " - $Note" }
     $s
 }
 
@@ -208,7 +217,8 @@ function Set-Firewall($Cfg) {
     }
 }
 
-function Invoke-Smoke($Cfg) {
+function Invoke-Smoke($Cfg, [bool]$Target) {
+    $svcUp  = (Get-Service $SvcName -ErrorAction SilentlyContinue).Status -eq 'Running'
     $r      = Get-ItemProperty $RegPath -ErrorAction SilentlyContinue
     $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalPort -in $Cfg.Port, 5900, 5800 } | Select-Object -ExpandProperty LocalPort -Unique)
@@ -217,7 +227,7 @@ function Invoke-Smoke($Cfg) {
     $fwPort = if ($fw) { ($fw | Get-NetFirewallPortFilter).LocalPort } else { '' }
     $broad  = @(Get-BroadAllowRules)
     $checks = [ordered]@{
-        'service tvnserver running'                   = (Get-Service $SvcName -ErrorAction SilentlyContinue).Status -eq 'Running'
+        'service tvnserver running'                   = $svcUp
         'RfbPort matches config'                      = $r.RfbPort -eq $Cfg.Port
         'listening on config port, not 5900/5800'     = ($listen -contains $Cfg.Port) -and ($listen -notcontains 5900) -and ($listen -notcontains 5800)
         'AcceptHttpConnections = 0'                   = $r.AcceptHttpConnections -eq 0
@@ -230,6 +240,16 @@ function Invoke-Smoke($Cfg) {
         "no broad inbound allow rule (found $($broad.Count))" = $broad.Count -eq 0
         'port reserved (excludedportrange)'           = [bool](Get-ExcludedRanges | Where-Object { $_.Admin -and $Cfg.Port -ge $_.Start -and $Cfg.Port -le $_.End })
     }
+    $note = ''
+    if (-not $Target) {
+        $note = 'managed (not in Targets)'
+        if (-not $svcUp) {
+            # managed ที่ service หยุดไว้ (เช่นเครื่อง admin ที่ใช้แค่ Viewer) ไม่ start ให้เอง -> ตรวจแค่ config
+            $checks.Remove('service tvnserver running')
+            $checks.Remove('listening on config port, not 5900/5800')
+            $note += ', service stopped'
+        }
+    }
     $fail = 0
     foreach ($c in $checks.GetEnumerator()) {
         if ($c.Value) { Write-Host "PASS  $($c.Key)" } else { $fail++; Write-Host "FAIL  $($c.Key)" }
@@ -237,20 +257,22 @@ function Invoke-Smoke($Cfg) {
     foreach ($b in $broad) { Write-Host "  broad rule: $($b.DisplayName)" }
     $off = @(Get-FirewallOff)
     if ($off.Count) { Write-Host "WARN  Windows Firewall disabled on profile: $($off -join ', ') - port guarded only by TightVNC IP filter + password + user prompt ; helpdesk to enable firewall via VNC" }
-    Write-Host (Format-Summary $fail $off)
+    Write-Host (Format-Summary $fail $off $note)
     $fail
 }
 
 try {
     if (-not (Test-Path $ConfigPath)) { Write-Host 'SKIP no config (VNC not enabled for this group)'; exit 0 }
     $cfg = Read-VncConfig
-    if (-not (Test-Target $cfg)) {
+    $target = Test-Target $cfg
+    if (-not $target -and -not (Test-Managed)) {
         Write-Host "SKIP $env:COMPUTERNAME not in Targets"
         exit 0
     }
     $installed = [bool](Get-Service $SvcName -ErrorAction SilentlyContinue)
     if ($PlanOnly) {
-        Write-Host "PLAN target=yes installed=$installed msi=$(Test-Path $Msi) helpdesk=$($cfg.Helpdesk.Count) controlPassword=$([bool]$cfg.ControlPassword)"
+        $tag = if ($target) { 'yes' } else { 'no-managed' }
+        Write-Host "PLAN target=$tag installed=$installed msi=$(Test-Path $Msi) helpdesk=$($cfg.Helpdesk.Count) controlPassword=$([bool]$cfg.ControlPassword)"
         exit 0
     }
     Test-Prereq $cfg
@@ -258,14 +280,16 @@ try {
     if (-not $installed) { Install-Server }
     Set-ServerConfig $cfg
     Set-Firewall $cfg
-    if ($script:Changed) {
+    # managed นอก Targets: service ที่หยุดไว้ปล่อยหยุด ; รันอยู่ + ค่าเปลี่ยน = restart ให้ค่าใหม่มีผล
+    $running = (Get-Service $SvcName).Status -eq 'Running'
+    if ($script:Changed -and ($target -or $running)) {
         Restart-Service $SvcName
         Write-Host '  restarted tvnserver'
-    } elseif ((Get-Service $SvcName).Status -ne 'Running') {
+    } elseif ($target -and -not $running) {
         Start-Service $SvcName
         Write-Host '  started tvnserver'
     }
-    exit (Invoke-Smoke $cfg)
+    exit (Invoke-Smoke $cfg $target)
 } catch {
     Write-Host "FAIL $($_.Exception.Message)"
     exit 100

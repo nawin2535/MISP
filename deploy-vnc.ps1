@@ -318,7 +318,8 @@ function Set-Firewall($Cfg) {
     }
 }
 
-function Invoke-Smoke($Cfg, [bool]$Target, [string]$Fw) {
+function Invoke-Smoke($Cfg, [bool]$Target, [string]$FwNote) {
+    # ห้ามตั้งชื่อ parameter เป็น $Fw : ตัวแปร PowerShell ไม่แยกตัวพิมพ์ ชน $fw (rule) ข้างล่าง -> rule ถูกแปลงเป็น string (18 พ.ย. 2569)
     $svcUp  = (Get-Service $SvcName -ErrorAction SilentlyContinue).Status -eq 'Running'
     $r      = Get-ItemProperty $RegPath -ErrorAction SilentlyContinue
     $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
@@ -356,8 +357,8 @@ function Invoke-Smoke($Cfg, [bool]$Target, [string]$Fw) {
         if ($c.Value) { Write-Host "PASS  $($c.Key)" } else { $fail++; Write-Host "FAIL  $($c.Key)" }
     }
     foreach ($b in $broad) { Write-Host "  broad rule: $($b.DisplayName)" }
-    if ($Fw -match 'WARN') { Write-Host "WARN  $Fw - port guarded only by TightVNC IP filter + password + user prompt" }
-    Write-Host (Format-Summary $fail $Fw $note)
+    if ($FwNote -match 'WARN') { Write-Host "WARN  $FwNote - port guarded only by TightVNC IP filter + password + user prompt" }
+    Write-Host (Format-Summary $fail $FwNote $note)
     $fail
 }
 
@@ -394,7 +395,8 @@ try {
     }
     exit (Invoke-Smoke $cfg $target $fwText)
 } catch {
-    Write-Host "FAIL $($_.Exception.Message)"
+    # เลขบรรทัดขึ้นการ์ด Discord -> ไล่ปัญหาจากการ์ดได้เลยไม่ต้องเข้าเครื่อง
+    Write-Host "FAIL $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))"
     exit 100
 }
 # EOF-SENTINEL-SSJMUK

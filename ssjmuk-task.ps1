@@ -36,6 +36,10 @@ $URL_Download  = "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.10-1.m
 $VncConfigPath = "${env:ProgramFiles(x86)}\ossec-agent\shared\ssjmuk-vnc.SECRET"
 $VncMsiRelPath = "vnc/tightvnc-2.8.85-gpl-setup-64bit.msi"
 
+# Step 10: Print Spooler watchdog (spoolsv ค้าง -> printer หาย / Excel ค้าง ; เคส 19 พ.ย. 2569)
+# "install" = ลง/อัปเดต task ; "uninstall" = ถอด task ทั้งฟลีต (rollback) ; ramp อยู่ใน spooler-watchdog.ps1 ($EnforceAll)
+$SpoolerWatchdogMode = "install"
+
 # Scripts to download from GitHub before execution
 $ScriptsToDownload = @(
     @{
@@ -65,6 +69,9 @@ $script:WazuhVersionInfo = $null   # e.g. "4.14.4 → upgraded to 4.14.5" หร
 
 # Step 9: ผล VNC สำหรับ Discord summary (SKIP / SUMMARY PASS / SUMMARY FAIL (n) / FAIL ... ; ต่อท้าย "- WARN firewall off: ..." ได้)
 $script:VncInfo = $null
+
+# Step 10: SUMMARY ของ spooler-watchdog.ps1 (สถานะ task, mode, สถิติ 24 ชม. ; มี WARN = ไอคอนเตือน)
+$script:SpoolerInfo = $null
 
 # Jitter ที่ launcher (run-ssjmuk-task.bat) สุ่มได้ - อ่านจาก last_jitter.txt เพื่อ log + Discord
 $script:JitterInfo = $null
@@ -143,6 +150,10 @@ function Send-DiscordSummary {
             # ติดตั้งผ่านแต่ firewall ปิด = รายการงาน helpdesk (ค้น "firewall off" ใน Discord) ไม่ใช่ FAIL
             if ($_.Success -and $script:VncInfo -match 'WARN') { $line = "$iconWarn $($_.Name) $req" }
             $line += " [$script:VncInfo]"
+        }
+        if ($_.Name -eq "Step10-SpoolerWatchdog" -and $script:SpoolerInfo) {
+            if ($_.Success -and $script:SpoolerInfo -match 'WARN') { $line = "$iconWarn $($_.Name) $req" }
+            $line += " [$script:SpoolerInfo]"
         }
         $line
     }
@@ -1349,6 +1360,36 @@ function Invoke-Step9-DeployVnc {
     Write-Log "Step 9 exit $code : $script:VncInfo" "ERROR"
     return $false
 }
+
+function Invoke-Step10-SpoolerWatchdog {
+    Write-Log "========================================" "INFO"
+    Write-Log "Step 10: Print Spooler watchdog ($SpoolerWatchdogMode)" "INFO"
+    Write-Log "========================================" "INFO"
+
+    # task ตรวจทุก 30 นาทีเรียกไฟล์นี้จาก path เดียวกัน -> อัปเดตแบบ atomic เหมือน Step 9
+    $wdPath = Join-Path $ScriptPath "spooler-watchdog.ps1"
+    $scriptItem = @{
+        RelPath = "spooler-watchdog.ps1"; TargetPath = $wdPath
+        MinBytes = 2000; EndMarker = '# EOF-SENTINEL-SSJMUK'; IsPowerShell = $true
+    }
+    if (-not (Invoke-AtomicGroupUpdate -GroupName "spooler-watchdog" -Items @($scriptItem))) {
+        $script:SpoolerInfo = "download failed"
+        return $false
+    }
+
+    $modeArg = if ($SpoolerWatchdogMode -eq "uninstall") { "-Uninstall" } else { "-Install" }
+    $out  = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wdPath $modeArg 2>&1
+    $code = $LASTEXITCODE
+    foreach ($l in $out) { Write-Log "  spooler: $l" "INFO" }
+    $last = $out | Where-Object { "$_" -match '^(SUMMARY|FAIL )' } | Select-Object -Last 1
+    $script:SpoolerInfo = if ($last) { "$last" } else { "exit $code" }
+    if ($code -eq 0) {
+        Write-Log "Step 10 completed: $script:SpoolerInfo" "SUCCESS"
+        return $true
+    }
+    Write-Log "Step 10 exit $code : $script:SpoolerInfo" "ERROR"
+    return $false
+}
 #endregion
 
 #region Main Execution
@@ -1449,6 +1490,11 @@ try {
         $Step9Result = Invoke-Step9-DeployVnc
         $ScriptResults.Add(@{ Name = "Step9-DeployVnc"; Success = $Step9Result; Required = $false })
         if (-not $Step9Result) { Write-Log "Step 9 failed (non-critical)" "WARNING" }
+
+        # Step 10
+        $Step10Result = Invoke-Step10-SpoolerWatchdog
+        $ScriptResults.Add(@{ Name = "Step10-SpoolerWatchdog"; Success = $Step10Result; Required = $false })
+        if (-not $Step10Result) { Write-Log "Step 10 failed (non-critical)" "WARNING" }
     }
 
     # Summary log
